@@ -1,0 +1,667 @@
+basePath: /
+definitions:
+  model.WalletAccount:
+    properties:
+      address:
+        type: string
+      index:
+        type: integer
+      mnemonic:
+        description: 仅用于接口返回（wallet.json 的 accounts 节点不会写入）
+        type: string
+      name:
+        type: string
+      path:
+        type: string
+      privateKey:
+        type: string
+      publicKey:
+        type: string
+    type: object
+  request.BidPlacedRequest:
+    properties:
+      buyer:
+        type: string
+      deadline:
+        type: string
+      nonce:
+        type: integer
+      ordersId:
+        type: integer
+      price:
+        type: integer
+    required:
+    - buyer
+    - deadline
+    - nonce
+    - ordersId
+    - price
+    type: object
+  request.EntryOrdersRequest:
+    properties:
+      buyer:
+        type: string
+      deadline:
+        type: string
+      nftListId:
+        type: integer
+      nonce:
+        type: integer
+      price:
+        type: integer
+      seller:
+        type: string
+      tokenId:
+        type: integer
+    required:
+    - buyer
+    - deadline
+    - nftListId
+    - nonce
+    - price
+    - seller
+    - tokenId
+    type: object
+  request.LoginRequest:
+    properties:
+      password:
+        type: string
+      username:
+        type: string
+    required:
+    - password
+    - username
+    type: object
+  response.WalletAccountResult:
+    properties:
+      address:
+        type: string
+      index:
+        type: integer
+      mnemonic:
+        description: 仅用于接口返回（wallet.json 的 accounts 节点不会写入）
+        type: string
+      name:
+        type: string
+      path:
+        type: string
+      privateKey:
+        type: string
+      publicKey:
+        type: string
+    type: object
+  response.WalletAccountsResult:
+    properties:
+      accounts:
+        items:
+          $ref: '#/definitions/model.WalletAccount'
+        type: array
+    type: object
+  response.WalletResult:
+    properties:
+      address:
+        description: 地址
+        type: string
+      mnemonic:
+        description: 助记词
+        type: string
+      privateKey:
+        description: 私钥
+        type: string
+      publicKey:
+        description: 公钥
+        type: string
+    type: object
+host: localhost:8081
+info:
+  contact: {}
+  description: bloom-nft 接口文档 认证方式：在 Authorize 中填写 "Bearer {token}"
+  title: bloom-nft
+  version: "1.0"
+paths:
+  /auth/login:
+    post:
+      consumes:
+      - application/json
+      description: 返回 token
+      parameters:
+      - description: 登录参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/request.LoginRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: 登录
+      tags:
+      - auth
+  /nft/all:
+    get:
+      consumes:
+      - application/json
+      description: 返回所有系列 NFT 列表
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 获取所有系列NFT
+      tags:
+      - nft
+  /nft/listall/{nftId}:
+    get:
+      consumes:
+      - application/json
+      description: 返回指定系列下的所有 NFT
+      parameters:
+      - description: NFT 系列Id
+        in: path
+        name: nftId
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 根据NFT系列Id获取所有NFT
+      tags:
+      - nft
+    post:
+      consumes:
+      - application/json
+      description: 更新NFT NFT
+      parameters:
+      - description: NFT tokenUrl
+        in: path
+        name: tokenUrl
+        required: true
+        type: integer
+      - description: NFT tokenId
+        in: path
+        name: tokenId
+        required: true
+        type: integer
+      - description: NFT owner
+        in: path
+        name: owner
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 更新NFT
+      tags:
+      - nft
+  /nft/mint:
+    post:
+      consumes:
+      - multipart/form-data
+      description: 上传表单文件到 Pinata，并返回生成所需的 CID 与 tokenURI URL
+      parameters:
+      - description: NFT 名称
+        in: header
+        name: name
+        required: true
+        type: string
+      - description: NFT 描述
+        in: header
+        name: description
+        required: true
+        type: string
+      - description: 上传文件（用于生成 tokenURI 内容）
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 铸造 NFT（Pinata 上传）
+      tags:
+      - nft
+  /nft/user/categories:
+    get:
+      consumes:
+      - application/json
+      description: 根据 owner 地址返回其拥有的 NFT 类目（Nft）列表
+      parameters:
+      - description: 用户钱包地址
+        in: query
+        name: owner
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 用户所拥有的NFT类目列表
+      tags:
+      - nft
+  /nft/user/list/{nftId}:
+    get:
+      consumes:
+      - application/json
+      description: 根据 owner 地址和 nftId 返回该用户在该类目下的所有 NFT
+      parameters:
+      - description: 用户钱包地址
+        in: query
+        name: owner
+        required: true
+        type: string
+      - description: NFT 系列Id
+        in: path
+        name: nftId
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 用户该NFT类目下的所有NFT列表
+      tags:
+      - nft
+  /order/bidlist/{ordersId}:
+    get:
+      consumes:
+      - application/json
+      description: 获取某个订单 `ordersId` 下的出价列表
+      parameters:
+      - description: 订单ID
+        in: path
+        name: ordersId
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 获取出价列表
+      tags:
+      - order
+  /order/bidplaced:
+    post:
+      consumes:
+      - application/json
+      description: 对某个挂单订单进行出价（bid placed）
+      parameters:
+      - description: 出价参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/request.BidPlacedRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 创建出价
+      tags:
+      - order
+  /order/entryorders:
+    post:
+      consumes:
+      - application/json
+      description: 创建挂单（entry order）
+      parameters:
+      - description: 挂单参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/request.EntryOrdersRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 创建挂单
+      tags:
+      - order
+  /order/orderlist:
+    get:
+      consumes:
+      - application/json
+      description: 获取挂单列表
+      parameters:
+      - description: NFT 系列Id（可选；不传则返回全部）
+        in: query
+        name: nftId
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 获取挂单列表
+      tags:
+      - order
+  /test/ping:
+    get:
+      description: 返回 pong
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: ping 测试
+      tags:
+      - ping
+  /test/time:
+    get:
+      description: 返回当前服务器时间（RFC3339 格式）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: 获取当前时间
+      tags:
+      - api
+  /wallet/account/all:
+    get:
+      description: 查看本地保存的全部账户列表
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountsResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 查看所有账户
+      tags:
+      - wallet
+  /wallet/account/current:
+    get:
+      description: 查看当前选中的账户
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 查看当前账户
+      tags:
+      - wallet
+  /wallet/account/switch:
+    get:
+      description: 按 index 切换当前账户
+      parameters:
+      - description: 账户 index
+        in: query
+        name: index
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 切换当前账户
+      tags:
+      - wallet
+  /wallet/backup:
+    get:
+      description: 备份当前钱包信息（具体内容取决于实现）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 备份钱包
+      tags:
+      - wallet
+  /wallet/create/mnemonic:
+    get:
+      description: 创建一个助记词
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 创建助记词
+      tags:
+      - wallet
+  /wallet/create/wallet:
+    get:
+      description: 创建一个钱包,如果有助记词根据助记词创建,否者创建一个新钱包并返回助记词/地址/密钥等信息
+      parameters:
+      - description: 助记词（空格分隔）；不传则自动生成
+        in: query
+        name: mnemonic
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 创建钱包
+      tags:
+      - wallet
+  /wallet/import:
+    post:
+      consumes:
+      - multipart/form-data
+      description: 上传钱包 JSON 文件导入钱包并返回钱包信息
+      parameters:
+      - description: 钱包 JSON 文件
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletResult'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/response.WalletResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 导入钱包
+      tags:
+      - wallet
+  /wallet/restore:
+    get:
+      description: 从默认备份源恢复钱包（具体内容取决于实现）
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 恢复钱包
+      tags:
+      - wallet
+  /wallet/restore/mnemonic:
+    get:
+      description: 通过助记词恢复钱包并返回钱包信息
+      parameters:
+      - description: 助记词（空格分隔）
+        in: query
+        name: mnemonic
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 根据助记词恢复钱包
+      tags:
+      - wallet
+  /wallet/restore/privateKey:
+    get:
+      description: 通过私钥恢复钱包并返回钱包信息
+      parameters:
+      - description: 私钥（hex 字符串）
+        in: query
+        name: privateKey
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/response.WalletAccountResult'
+      security:
+      - ApiKeyAuth: []
+      summary: 根据私钥恢复钱包
+      tags:
+      - wallet
+securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

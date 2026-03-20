@@ -1,0 +1,22 @@
+{
+  "mnemonic": "category young dish bubble bread mutual home toddler road welcome october bronze",
+  "currentAccountIndex": 1,
+  "accounts": [
+    {
+      "index": 0,
+      "path": "m/44'/60'/0'/0/0",
+      "name": "Account 0",
+      "privateKey": "0xf66ff3b67a722ce051fb7c77f3f9ad1582e420c3b24a6234177435a989fc8fc7",
+      "publicKey": "0x042f7fa3112566992865808762cef2979942451566c93439cb327f935475f48014685a6899490bf28722f16135899527db32b5345ede74f6d04ce1686def8507f2",
+      "address": "0x38Febc766676A5E810ede43c0ec4B60a58Ed4c34"
+    },
+    {
+      "index": 1,
+      "path": "m/44'/60'/0'/0/1",
+      "name": "Account 1",
+      "privateKey": "0x60f7f8bd53601ea8b07a6bf02fb61cc7c229ee1363bf4087e7ea458c01494e7b",
+      "publicKey": "0x049e080cbd735c1663e74c2e67c4f250f0623ce7635dc60ced0f8649ede09591a94fbc1dd0684a8e1076c7080a7fec2ccc83da12f8a517df18837e4dc3f39bb5b1",
+      "address": "0x26DAE7bA52a08C1096A349eC0F188740985287b1"
+    }
+  ]
+}

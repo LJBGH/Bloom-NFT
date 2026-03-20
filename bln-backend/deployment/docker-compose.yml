@@ -1,0 +1,21 @@
+
+version: '3'
+
+services:
+  bloom-nft:
+    build: ../.
+    container_name: bloom-nft
+    image: registry.localdev:5000/bloom-nft/bloom-nft-go:0.0.1
+    restart: always
+    ports:
+    - 8081:8081
+    environment:
+      - GO_ENV=production  # 设置环境变量
+    networks:
+      - bloom-nft_net
+    # volumes:
+    #   - ./config:/app/config
+      
+networks:
+  bloom-nft_net:
+
