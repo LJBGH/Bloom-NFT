@@ -59,3 +59,5 @@ bundle
 # pnpm deploy output
 **/bundle/
 
+/bln-contracts/package-lock.json
+/bln-forntend/package-lock.json
