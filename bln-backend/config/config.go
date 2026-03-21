@@ -39,6 +39,12 @@ type Config struct {
 		RpcUrl            string `mapstructure:"RPC_URL"`
 		AccountPrivateKey string `mapstructure:"ACCOUNT_PRIVATEKEY"`
 	} `mapstructure:"NETWORK"`
+	Listener struct {
+		Enabled         bool   `mapstructure:"ENABLED"`
+		StartBlock      uint64 `mapstructure:"START_BLOCK"`
+		PollIntervalSec int    `mapstructure:"POLL_INTERVAL_SEC"`
+		BatchSize       uint64 `mapstructure:"BATCH_SIZE"`
+	} `mapstructure:"LISTENER"`
 }
 
 var AppConfig Config

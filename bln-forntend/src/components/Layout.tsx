@@ -3,8 +3,8 @@ import { WalletButton } from "./WalletButton";
 
 type Props = {
   children: React.ReactNode;
-  activeTab: "airdrop" | "mint" | "profile";
-  onTabChange: (tab: "airdrop" | "mint" | "profile") => void;
+  activeTab: "airdrop" | "market" | "mint" | "profile" | "tools";
+  onTabChange: (tab: "airdrop" | "market" | "mint" | "profile" | "tools") => void;
 };
 
 export function Layout({ children, activeTab, onTabChange }: Props) {
@@ -31,11 +31,25 @@ export function Layout({ children, activeTab, onTabChange }: Props) {
               个人
             </Button>
             <Button
+              color={activeTab === "market" ? "primary" : "inherit"}
+              variant={activeTab === "market" ? "contained" : "text"}
+              onClick={() => onTabChange("market")}
+            >
+              市场
+            </Button>
+            <Button
               color={activeTab === "airdrop" ? "primary" : "inherit"}
               variant={activeTab === "airdrop" ? "contained" : "text"}
               onClick={() => onTabChange("airdrop")}
             >
               空投
+            </Button>
+            <Button
+              color={activeTab === "tools" ? "primary" : "inherit"}
+              variant={activeTab === "tools" ? "contained" : "text"}
+              onClick={() => onTabChange("tools")}
+            >
+              工具
             </Button>
           </Stack>
           <WalletButton />

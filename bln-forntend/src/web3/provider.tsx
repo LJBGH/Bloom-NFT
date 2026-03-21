@@ -14,6 +14,13 @@ type Web3ContextValue = {
 
 const Web3Context = createContext<Web3ContextValue | undefined>(undefined);
 
+// EIP-1193 的 runtime 对象在 MetaMask 等实现里通常带有 `on/removeListener`，
+// 但 ethers 的 Eip1193Provider 类型未显式暴露这些方法。为了不影响编译，这里补充最小类型。
+type EthereumWithListeners = Eip1193Provider & {
+  on?: (eventName: string, listener: (...args: any[]) => void) => void;
+  removeListener?: (eventName: string, listener: (...args: any[]) => void) => void;
+};
+
 function getEthereumFromWindow(): Eip1193Provider | null {
   if (typeof window === "undefined") return null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -28,7 +35,7 @@ export function Web3Provider({ children }: { children: React.ReactNode }) {
   const [chainId, setChainId] = useState<number | null>(null);
 
   useEffect(() => {
-    const eth = getEthereumFromWindow();
+    const eth = getEthereumFromWindow() as EthereumWithListeners | null;
     if (!eth) return;
 
     const browserProvider = new BrowserProvider(eth);

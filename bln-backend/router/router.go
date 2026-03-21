@@ -69,6 +69,7 @@ func SetupRouter(
 		api.GET("/order/bidlist/:ordersId", nftOrdersHandler.GetBidPlacedList)  //出价列表
 		api.POST("/order/entryorders", nftOrdersHandler.EntryOrders)            // 挂单
 		api.POST("/order/bidplaced", nftOrdersHandler.BidPlaced)                // 出价
+		api.POST("/order/bidaccepted", nftOrdersHandler.BidAccepted)            // 接受出价
 	}
 	return r
 }

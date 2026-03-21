@@ -319,6 +319,48 @@
                 }
             }
         },
+        "/order/bidaccepted": {
+            "post": {
+                "description": "接受出价",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "order"
+                ],
+                "summary": "接受出价",
+                "parameters": [
+                    {
+                        "description": "出价参数",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/request.BidPlacedRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/order/bidlist/{ordersId}": {
             "get": {
                 "description": "获取某个订单 `ordersId` 下的出价列表",
@@ -883,7 +925,8 @@
                 "deadline",
                 "nonce",
                 "ordersId",
-                "price"
+                "price",
+                "signature"
             ],
             "properties": {
                 "buyer": {
@@ -893,47 +936,60 @@
                     "type": "string"
                 },
                 "nonce": {
-                    "type": "integer"
+                    "type": "integer",
+                    "minimum": 0
                 },
                 "ordersId": {
                     "type": "integer"
                 },
                 "price": {
-                    "type": "integer"
+                    "type": "number"
+                },
+                "signature": {
+                    "description": "EIP-712 signature",
+                    "type": "string"
                 }
             }
         },
         "request.EntryOrdersRequest": {
             "type": "object",
             "required": [
-                "buyer",
                 "deadline",
                 "nftListId",
                 "nonce",
                 "price",
                 "seller",
+                "signature",
                 "tokenId"
             ],
             "properties": {
-                "buyer": {
-                    "type": "string"
-                },
                 "deadline": {
+                    "description": "截止时间",
                     "type": "string"
                 },
                 "nftListId": {
+                    "description": "NFTId",
                     "type": "integer"
                 },
                 "nonce": {
-                    "type": "integer"
+                    "description": "非重复 nonce（允许 0）",
+                    "type": "integer",
+                    "minimum": 0
                 },
                 "price": {
-                    "type": "integer"
+                    "description": "Price 价格（BT）",
+                    "type": "number"
                 },
                 "seller": {
+                    "description": "卖家地址",
+                    "type": "string"
+                },
+                "signature": {
+                    "description": "EIP-712 signature",
                     "type": "string"
                 },
                 "tokenId": {
+                    "description": "tokenId",
                     "type": "integer"
                 }
             }

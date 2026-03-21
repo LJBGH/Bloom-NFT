@@ -25,41 +25,54 @@ definitions:
       deadline:
         type: string
       nonce:
+        minimum: 0
         type: integer
       ordersId:
         type: integer
       price:
-        type: integer
+        type: number
+      signature:
+        description: EIP-712 signature
+        type: string
     required:
     - buyer
     - deadline
     - nonce
     - ordersId
     - price
+    - signature
     type: object
   request.EntryOrdersRequest:
     properties:
-      buyer:
-        type: string
       deadline:
+        description: 截止时间
         type: string
       nftListId:
+        description: NFTId
         type: integer
       nonce:
+        description: 非重复 nonce（允许 0）
+        minimum: 0
         type: integer
       price:
-        type: integer
+        description: Price 价格（BT）
+        type: number
       seller:
+        description: 卖家地址
+        type: string
+      signature:
+        description: EIP-712 signature
         type: string
       tokenId:
+        description: tokenId
         type: integer
     required:
-    - buyer
     - deadline
     - nftListId
     - nonce
     - price
     - seller
+    - signature
     - tokenId
     type: object
   request.LoginRequest:
@@ -327,6 +340,34 @@ paths:
       summary: 用户该NFT类目下的所有NFT列表
       tags:
       - nft
+  /order/bidaccepted:
+    post:
+      consumes:
+      - application/json
+      description: 接受出价
+      parameters:
+      - description: 出价参数
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/request.BidPlacedRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties: true
+            type: object
+      summary: 接受出价
+      tags:
+      - order
   /order/bidlist/{ordersId}:
     get:
       consumes:

@@ -1,4 +1,3 @@
-import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import {
   CssBaseline,
@@ -27,12 +26,10 @@ let theme = createTheme({
 theme = responsiveFontSizes(theme);
 
 createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <Web3Provider>
-        <App />
-      </Web3Provider>
-    </ThemeProvider>
-  </StrictMode>
+  <ThemeProvider theme={theme}>
+    <CssBaseline />
+    <Web3Provider>
+      <App />
+    </Web3Provider>
+  </ThemeProvider>
 );

@@ -71,6 +71,10 @@ export function getBloomMarketplaceContract(
   return new Contract(address, BloomMarketplaceArtifact.abi, providerOrSigner);
 }
 
+export function getBloomMarketplaceAddress(chainId: number | null): string {
+  return getAddress("BloomMarketplace", chainId);
+}
+
 export function getBloomTokenAirdropContract(
   providerOrSigner: BrowserProvider | JsonRpcSigner,
   chainId: number | null

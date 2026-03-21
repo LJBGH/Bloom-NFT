@@ -8,5 +8,9 @@ func MigrateModels() []interface{} {
 		&model.NftList{},
 		&model.EntryOrders{},
 		&model.BidPlaced{},
+		&model.ChainEventCursor{},
+		&model.ChainEventLog{},
+		&model.ChainRefEntryOrder{},
+		&model.ChainRefBid{},
 	}
 }

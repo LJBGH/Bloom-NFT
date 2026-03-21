@@ -23,18 +23,18 @@ contract BloomMarketplace is Ownable, EIP712 {
     event Withdraw(address indexed sender, uint256 amount);
 
     // 上架
-    event Listed(address indexed nft, address indexed seller, uint256 indexed tokenId, uint256 price, uint256 deadline, uint256 nonce);
-    // 更改价格
-    event ListingPriceChanged(bytes32 indexed listingHash, address indexed seller, uint256 newPrice);
+    event Listed(bytes32 indexed listingHash, address indexed nft, address indexed seller, uint256 tokenId, uint256 price, uint256 deadline, uint256 nonce);
     // 取消上架
     event ListingCancelled(bytes32 indexed listingHash, address indexed seller);
+    // 购买
+    event Buy(bytes32 indexed listingHash, address indexed buyer);
  
     // 出价
-    event BidPlaced(bytes32 indexed listingHash, address indexed buyer, uint256 price, uint256 deadline, uint256 nonce);
+    event BidPlaced(bytes32 indexed bidhash, bytes32 indexed listingHash, address indexed buyer, uint256 price, uint256 deadline, uint256 nonce);
     // 撤回出价
     event BidCancelled(bytes32 indexed bidhash, address indexed buyer);
     // 接受出价
-    event BidAccepted(bytes32 indexed listingHash, bytes32 indexed bidhash, address indexed buyer);
+    event BidAccepted(bytes32 indexed listingHash, bytes32 indexed bidHash, address seller, address buyer);
 
     // 上架信息
     struct Listing {
@@ -57,18 +57,18 @@ contract BloomMarketplace is Ownable, EIP712 {
 
     // 非重复 nonce
     mapping(address => uint256) public nonces;
+
     // 上架 上架hash=>bool
     mapping(bytes32 => bool) public listings;
+
     // 出价 出价hash=>bool
     mapping(bytes32 => bool) public bids;
-    // 购买 出价hash=>bool
+
+    // 托管出价金额 出价hash=>金额
+    mapping(bytes32 => uint256) public bidEscrow;
+
+    // 成交状态（仅针对 listingHash）
     mapping(bytes32 => bool) public sold;
-
-
-    // // 出价信息 
-    // mapping(bytes32 => Bid) public bids;
-    // // 上架信息 
-    // mapping(bytes32 => Listing) public listings;
 
     // 上架类型hash
     bytes32 private constant LISTING_TYPEHASH =
@@ -120,6 +120,7 @@ contract BloomMarketplace is Ownable, EIP712 {
         // 托管 NFT 到市场合约（任何人都可代提交签名，上架由合约执行）
         IERC721(listing.nft).safeTransferFrom(listing.seller, address(this), listing.tokenId);
         emit Listed(
+            listingHash,
             listing.nft,
             listing.seller,
             listing.tokenId,
@@ -129,41 +130,119 @@ contract BloomMarketplace is Ownable, EIP712 {
         );
     }
 
-    // 更改价格
-    function changePrice(bytes32 listingHash, uint256 newPrice) external isListing(listingHash) returns(bytes32){
-        require(!sold[listingHash], "already sold");
-        require(newPrice > 0, "newPrice is 0");
+    // 取消上架（不依赖链上存储 Listing 元数据）
+    // 调用方必须提供原始 listing 字段，合约重算 hash 后校验并退回 NFT
+    function cancelListing(Listing calldata listing) external {
+        // 只允许卖家本人取消
+        require(msg.sender == listing.seller, "not seller");
 
-        // listing.price = newPrice;
-        emit ListingPriceChanged(listingHash, msg.sender, newPrice);
-        return listingHash;
-    }
+        // 与 listWithSig 同一规则重算 listingHash
+        bytes32 structHash = keccak256(
+            abi.encode(
+                LISTING_TYPEHASH,
+                listing.nft,
+                listing.seller,
+                listing.tokenId,
+                listing.price,
+                listing.deadline,
+                listing.nonce
+            )
+        );
+        bytes32 listingHash = _hashTypedDataV4(structHash);
 
-    // 取消上架
-    function cancelListing(bytes32 listingHash) external isListing(listingHash) {
+        // 必须当前处于上架状态且未成交
+        require(listings[listingHash], "not listing");
         require(!sold[listingHash], "already sold");
+
+        // 先关单再转 NFT（防重入）
         listings[listingHash] = false;
+
+        // NFT 从市场合约托管地址退回卖家
+        IERC721(listing.nft).safeTransferFrom(address(this), listing.seller, listing.tokenId);
+
         emit ListingCancelled(listingHash, msg.sender);
     }
 
+    // 用户购买
+    function buy(Listing calldata listing, bytes calldata signature) external returns(bytes32 buyHash){
+        require(listing.deadline >= block.timestamp, "expired");
+        require(listing.seller != address(0), "seller=0");
+        require(listing.seller != msg.sender, "seller=buyer");
+        require(listing.price > 0, "price=0");
+
+        bytes32 listingHash = _verifyListing(listing, signature);
+        require(listings[listingHash], "not listing");
+        require(!sold[listingHash], "already sold");
+
+        // 结算：买家付款（BloomToken），市场抽成，卖家收款
+        uint256 fee = listing.price * feeRate / feePrecision;
+        require(token.transferFrom(msg.sender, address(this), fee), "pay fee failed");
+        require(
+            token.transferFrom(msg.sender, listing.seller, listing.price - fee),
+            "pay price failed"
+        );
+
+        // NFT 从市场托管地址转给买家
+        IERC721(listing.nft).safeTransferFrom(address(this), msg.sender, listing.tokenId);
+
+        // 标记成交并关闭挂单
+        sold[listingHash] = true;
+        listings[listingHash] = false;
+
+        // 返回购买哈希（不入库存储，仅用于链下追踪）
+        buyHash = keccak256(abi.encode(listingHash, msg.sender));
+
+        emit Buy(listingHash, msg.sender);
+    }
+
     // 用户出价（签名订单）
-    function placeBid(Bid calldata bid, bytes calldata signature) external  returns(bytes32 bidHash){
+    function bidWithSig(Bid calldata bid, bytes calldata signature) external  returns(bytes32 bidHash){
+        require(bid.buyer != address(0), "buyer=0");
+        require(msg.sender == bid.buyer, "not buyer");
+        require(bid.price > 0, "price=0");
         require(bid.deadline >= block.timestamp, "expired");
         require(listings[bid.listingHash], "not listing");
         require(!sold[bid.listingHash], "already sold");
-
         require(bid.nonce == nonces[bid.buyer], "bad nonce");
         nonces[bid.buyer] = bid.nonce + 1;
         bidHash = _verifyBid(bid, signature);
         require(!bids[bidHash], "bis is exsit");
-        bids[bidHash] = true;
 
-        emit BidPlaced(bid.listingHash, bid.buyer, bid.price, bid.deadline, bid.nonce);
+        // 出价即托管资金到市场合约
+        require(token.transferFrom(bid.buyer, address(this), bid.price), "escrow failed");
+        bids[bidHash] = true;
+        bidEscrow[bidHash] = bid.price;
+
+        emit BidPlaced(bidHash, bid.listingHash, bid.buyer, bid.price, bid.deadline, bid.nonce);
     }
 
-    // 撤回出价
-    function _cancelBid(bytes32 bidHash) external isBid(bidHash){
+    // 撤回出价（参考 cancelListing，不依赖签名参数）
+    function cancelBid(Bid calldata bid) external {
+        // 与 placeBid 同一规则重算 bidHash
+        bytes32 structHash = keccak256(
+            abi.encode(
+                BID_TYPEHASH,
+                bid.listingHash,
+                bid.buyer,
+                bid.price,
+                bid.deadline,
+                bid.nonce
+            )
+        );
+        bytes32 bidHash = _hashTypedDataV4(structHash);
+
+        require(bids[bidHash], "not bid");
+        require(msg.sender == bid.buyer, "not buyer");
+        require(!sold[bid.listingHash], "already sold");
+
+        uint256 escrowAmount = bidEscrow[bidHash];
+        require(escrowAmount > 0, "no escrow");
+
         bids[bidHash] = false;
+        bidEscrow[bidHash] = 0;
+
+        // 撤回时原路退款给买家
+        require(token.transfer(bid.buyer, escrowAmount), "refund failed");
         emit BidCancelled(bidHash, msg.sender);
     }
 
@@ -177,26 +256,23 @@ contract BloomMarketplace is Ownable, EIP712 {
 
         require(listing.deadline >= block.timestamp, "listing expired");
         require(bid.deadline >= block.timestamp, "bid expired");
+        require(msg.sender == listing.seller, "not seller");
+        require(listing.seller != bid.buyer, "seller=buyer");
 
         bytes32 listingHash = _verifyListing(listing, listingSignature);
         bytes32 bidHash = _verifyBid(bid, bidSignature);
-
-        require(listings[bid.listingHash], "not listing");
+        require(listings[listingHash], "not listing");
+        require(!sold[listingHash], "already sold");
         require(bids[bidHash], "bot bid");
-        require(!sold[bid.listingHash], "already sold");
-
         // Bid 中记录的 listingHash 必须匹配
         require(bid.listingHash == listingHash, "listingHash mismatch");
 
-        // 3. 结算：买家付款，市场抽成，NFT 转给买家
-        uint256 fee = bid.price * feeRate / feePrecision;
+        uint256 escrowAmount = bidEscrow[bidHash];
+        require(escrowAmount == bid.price, "bad escrow");
 
-        // 买家需事先对本合约 approve BloomToken
-        require(token.transferFrom(bid.buyer, address(this), fee), "pay fee failed");
-        require(
-            token.transferFrom(bid.buyer, listing.seller, bid.price - fee),
-            "pay price failed"
-        );
+        // 3. 结算：从托管款分账，市场抽成，卖家收款，NFT 转给买家
+        uint256 fee = bid.price * feeRate / feePrecision;
+        require(token.transfer(listing.seller, bid.price - fee), "pay price failed");
 
         // NFT 从市场托管地址转给买家
         IERC721(listing.nft).safeTransferFrom(address(this), bid.buyer, listing.tokenId);
@@ -205,8 +281,9 @@ contract BloomMarketplace is Ownable, EIP712 {
         sold[listingHash] = true;
         listings[listingHash] = false;
         bids[bidHash] = false;
+        bidEscrow[bidHash] = 0;
 
-        emit BidAccepted(listingHash, bidHash, bid.buyer);
+        emit BidAccepted(listingHash, bidHash, listing.seller, bid.buyer);
     }
 
     // 设置手续费率

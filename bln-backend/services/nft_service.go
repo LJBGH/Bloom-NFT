@@ -25,7 +25,7 @@ func NewNftService(nftRepository *repository.NftRepository, nftListRepository *r
 }
 
 // 铸造NFT
-func (n *NftService) Mint(request *request.MintRequest, fileData io.Reader) (*response.MintResult, error) {
+func (n *NftService) Mint(request *request.MintRequest, fileData io.Reader, isInsertDB bool) (*response.MintResult, error) {
 
 	// 上传到 Pinata
 	imageCID, err := utils.UploadToPinata(request.Name, fileData)
@@ -58,16 +58,18 @@ func (n *NftService) Mint(request *request.MintRequest, fileData io.Reader) (*re
 	}
 
 	// 插入数据库
-	n.NftListRepository.Insert(model.NftList{
-		NftID:       1,
-		Name:        request.Name,
-		Description: request.Description,
-		ImageUrl:    mingResult.ImageUrl,
-		MetadataUrl: mingResult.MetadataUrl,
-		TokenUrl:    mingResult.TokenUrl,
-		CreateTime:  time.Now(),
-		UpdateTime:  time.Now(),
-	})
+	if isInsertDB {
+		n.NftListRepository.Insert(model.NftList{
+			NftID:       1,
+			Name:        request.Name,
+			Description: request.Description,
+			ImageUrl:    mingResult.ImageUrl,
+			MetadataUrl: mingResult.MetadataUrl,
+			TokenUrl:    mingResult.TokenUrl,
+			CreateTime:  time.Now(),
+			UpdateTime:  time.Now(),
+		})
+	}
 
 	return &mingResult, nil
 }
@@ -100,13 +102,32 @@ func (n *NftService) AllNft() ([]model.Nft, error) {
 }
 
 // 根据NFT系列Id 获取所有NFT
-func (n *NftService) AllNftList(nftId uint) ([]model.NftList, error) {
+func (n *NftService) AllNftList(nftId uint) ([]response.NftListResult, error) {
 	allNftList, err := n.NftListRepository.GetListByNftId(nftId)
 	if err != nil {
 		return nil, err
 	}
+	result := make([]response.NftListResult, 0, len(allNftList))
+	for _, nft := range allNftList {
+		result = append(result, response.NftListResult{
+			ID:          nft.ID,
+			NftID:       nft.NftID,
+			Name:        nft.Name,
+			Description: nft.Description,
+			ImageUrl:    nft.ImageUrl,
+			MetadataUrl: nft.MetadataUrl,
+			TokenUrl:    nft.TokenUrl,
+			TokenId:     nft.TokenId,
+			Owner:       nft.Owner,
+			CreateTime:  nft.CreateTime,
+			UpdateTime:  nft.UpdateTime,
+			Status:      nft.EntryOrders.Status,
+			StatusDesc:  nft.EntryOrders.Status.Desc(),
+			Price:       nft.EntryOrders.Price,
+		})
+	}
 
-	return allNftList, nil
+	return result, nil
 }
 
 // 根据用户地址获取其拥有的 NFT 类目列表（返回 Nft）

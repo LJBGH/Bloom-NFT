@@ -38,12 +38,12 @@ func (n *NftOrdersHandler) EntryOrders(c *gin.Context) {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
 
-	var err = n.NftOrdersService.EntryOrders(&request)
+	txHash, err := n.NftOrdersService.EntryOrders(&request)
 	if err != nil {
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
-	c.JSON(http.StatusOK, model.OkWithData("Ok"))
+	c.JSON(http.StatusOK, model.OkWithData(txHash))
 }
 
 // 出价
@@ -62,12 +62,36 @@ func (n *NftOrdersHandler) BidPlaced(c *gin.Context) {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
 
-	var err = n.NftOrdersService.BidPlaced(&request)
+	txHash, err := n.NftOrdersService.BidPlaced(&request)
 	if err != nil {
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
-	c.JSON(http.StatusOK, model.OkWithData("Ok"))
+	c.JSON(http.StatusOK, model.OkWithData(txHash))
+}
+
+// 接受出价
+// @Summary      接受出价
+// @Description  接受出价
+// @Tags         order
+// @Accept       json
+// @Produce      json
+// @Param        request  body      request.BidPlacedRequest  true  "出价参数"
+// @Success      200      {object} map[string]interface{}
+// @Failure      400      {object} map[string]interface{}
+// @Router       /order/bidaccepted [post]
+func (n *NftOrdersHandler) BidAccepted(c *gin.Context) {
+	var request request.BidAcceptedRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+	}
+
+	txHash, err := n.NftOrdersService.BidAccepted(&request)
+	if err != nil {
+		panic(middleware.NewBusinessError(enums.FAILED, err))
+	}
+
+	c.JSON(http.StatusOK, model.OkWithData(txHash))
 }
 
 // 获取挂单列表
@@ -99,7 +123,7 @@ func (n *NftOrdersHandler) GetEntryOrdersList(c *gin.Context) {
 
 	respList, err := n.NftOrdersService.GetEntryOrdersList(nftIdPtr)
 	if err != nil {
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
 	c.JSON(http.StatusOK, model.OkWithData(respList))
@@ -123,7 +147,7 @@ func (n *NftOrdersHandler) GetBidPlacedList(c *gin.Context) {
 	}
 	list, err := n.NftOrdersService.GetBidPlacedList(uint(ordersIdParsed))
 	if err != nil {
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
 	c.JSON(http.StatusOK, model.OkWithData(list))

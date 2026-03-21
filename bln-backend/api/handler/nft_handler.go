@@ -61,10 +61,10 @@ func (n *NftHandler) Mint(c *gin.Context) {
 
 	defer src.Close()
 
-	result, err := n.NftService.Mint(&request, src)
+	result, err := n.NftService.Mint(&request, src, true)
 	if err != nil {
 		fmt.Printf("upload failed: %v\n", err)
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 	c.JSON(http.StatusOK, model.OkWithData(result))
 }
@@ -93,7 +93,7 @@ func (n *NftHandler) UpdateNftList(c *gin.Context) {
 
 	err = n.NftService.UpdateNftList(tokenUrl, uint(tokenIdParsed), owner)
 	if err != nil {
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
 	c.JSON(http.StatusOK, model.OkWithData("success"))
@@ -112,7 +112,7 @@ func (n *NftHandler) AllNft(c *gin.Context) {
 	allNft, err := n.NftService.AllNft()
 	if err != nil {
 		fmt.Printf("file open failed: %v\n", err)
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
 	c.JSON(http.StatusOK, model.OkWithData(allNft))
@@ -138,7 +138,7 @@ func (n *NftHandler) AllNftList(c *gin.Context) {
 	allNftList, err := n.NftService.AllNftList(uint(nftIdParsed))
 	if err != nil {
 		fmt.Printf("file open failed: %v\n", err)
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
 	c.JSON(http.StatusOK, model.OkWithData(allNftList))
@@ -162,7 +162,7 @@ func (n *NftHandler) UserCategories(c *gin.Context) {
 
 	categories, err := n.NftService.CategoriesByOwner(owner)
 	if err != nil {
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 	c.JSON(http.StatusOK, model.OkWithData(categories))
 }
@@ -192,7 +192,7 @@ func (n *NftHandler) UserNftList(c *gin.Context) {
 
 	list, err := n.NftService.NftListByOwnerAndNftId(owner, uint(nftIdParsed))
 	if err != nil {
-		panic(&middleware.BusinessError{ResposeCode: enums.FAILED})
+		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
 	c.JSON(http.StatusOK, model.OkWithData(list))

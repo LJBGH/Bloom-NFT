@@ -6,7 +6,12 @@ import (
 	"bloom-nft/enums"
 	"bloom-nft/model"
 	"bloom-nft/repository"
+	"bloom-nft/utils"
+	"errors"
+	"fmt"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 type NftOrdersService struct {
@@ -20,41 +25,141 @@ func NewNftOrdersService(nftOrdersRepository *repository.NftOrdersRepository) *N
 }
 
 // 挂单
-func (n *NftOrdersService) EntryOrders(request *request.EntryOrdersRequest) error {
-	err := n.NftOrdersRepository.InsertEntryOrders(model.EntryOrders{
+func (n *NftOrdersService) EntryOrders(request *request.EntryOrdersRequest) (string, error) {
+	entry := model.EntryOrders{
 		NftListID:  request.NftListID,
 		Seller:     request.Seller,
-		Buyer:      request.Buyer,
 		TokenId:    request.TokenId,
 		Price:      request.Price,
 		Deadline:   request.Deadline,
-		Nonce:      request.Nonce,
-		Status:     enums.Pending,
+		Nonce:      *request.Nonce,
+		Status:     enums.Ready,
+		Signature:  request.Signature,
 		CreateTime: time.Now(),
 		UpdateTime: time.Now(),
-	})
-	if err != nil {
-		return err
 	}
-	return nil
+
+	if err := n.NftOrdersRepository.InsertEntryOrders(entry); err != nil {
+		return "", fmt.Errorf("insert entry order failed: %w", err)
+	}
+
+	// 订单入库成功后，执行链上 listWithSig。
+	// 注意：listing.nft 必须与前端签名时使用的 NFT 合约地址一致。
+	var nftContractAddrStr string
+	if err := n.NftOrdersRepository.DB.
+		Table("nft_list").
+		Select("nft.address").
+		Joins("JOIN nft ON nft.id = nft_list.nft_id").
+		Where("nft_list.id = ?", request.NftListID).
+		Scan(&nftContractAddrStr).Error; err != nil {
+		return "", fmt.Errorf("query nft contract address failed (nftListId=%d): %w", request.NftListID, err)
+	}
+
+	nftContractAddr := common.HexToAddress(nftContractAddrStr)
+	if nftContractAddr == (common.Address{}) {
+		return "", errors.New("invalid nft contract address")
+	}
+
+	fmt.Println("开始上链挂单：", nftContractAddr.Hex())
+
+	txHash, err := utils.ListWithSigOnChain(entry, nftContractAddr)
+	if err != nil {
+		// best-effort: 标记为失效
+		_ = n.NftOrdersRepository.DB.Model(&model.EntryOrders{}).
+			Where("signature = ? AND seller = ? AND token_id = ? AND nft_list_id = ?",
+				request.Signature, request.Seller, request.TokenId, request.NftListID).
+			Updates(map[string]any{
+				"status":      enums.Invalid,
+				"update_time": time.Now(),
+			}).Error
+		return "", fmt.Errorf("listWithSig on-chain failed (nftListId=%d, seller=%s, tokenId=%d): %w", request.NftListID, request.Seller, request.TokenId, err)
+	}
+
+	return txHash.Hex(), nil
 }
 
 // 出价
-func (n *NftOrdersService) BidPlaced(request *request.BidPlacedRequest) error {
-	err := n.NftOrdersRepository.InsertBidPlaced(model.BidPlaced{
+func (n *NftOrdersService) BidPlaced(request *request.BidPlacedRequest) (string, error) {
+	var entry model.EntryOrders
+	if err := n.NftOrdersRepository.DB.Where("id = ?", request.OrdersID).First(&entry).Error; err != nil {
+		return "", fmt.Errorf("query entry order failed: %w", err)
+	}
+	if entry.Status != enums.Pending {
+		return "", fmt.Errorf("entry order status is not pending (orderId=%d, status=%d)", entry.ID, entry.Status)
+	}
+
+	var entryRef model.ChainRefEntryOrder
+	if err := n.NftOrdersRepository.DB.Where("entry_order_id = ?", entry.ID).First(&entryRef).Error; err != nil {
+		return "", fmt.Errorf("query listing hash mapping failed: %w", err)
+	}
+
+	bid := model.BidPlaced{
 		OrdersID:   request.OrdersID,
 		Buyer:      request.Buyer,
 		Price:      request.Price,
 		Deadline:   request.Deadline,
-		Nonce:      request.Nonce,
-		Status:     enums.Pending,
+		Nonce:      *request.Nonce,
+		Status:     enums.Ready,
+		Signature:  request.Signature,
 		CreateTime: time.Now(),
 		UpdateTime: time.Now(),
-	})
-	if err != nil {
-		return err
 	}
-	return nil
+	if err := n.NftOrdersRepository.InsertBidPlaced(bid); err != nil {
+		return "", fmt.Errorf("insert bid failed: %w", err)
+	}
+	if err := n.NftOrdersRepository.DB.Where("orders_id = ? AND buyer = ? AND nonce = ?",
+		bid.OrdersID, bid.Buyer, bid.Nonce).Order("id DESC").First(&bid).Error; err != nil {
+		return "", fmt.Errorf("query inserted bid failed: %w", err)
+	}
+
+	txHash, err := utils.BidWithSigOnChain(bid, common.HexToHash(entryRef.ListingHash))
+	if err != nil {
+		_ = n.NftOrdersRepository.DB.Model(&model.BidPlaced{}).Where("id = ?", bid.ID).Updates(map[string]any{
+			"status":      enums.Invalid,
+			"update_time": time.Now(),
+		}).Error
+		return "", fmt.Errorf("placeBid on-chain failed: %w", err)
+	}
+
+	return txHash.Hex(), nil
+}
+
+// 接受出价
+func (n *NftOrdersService) BidAccepted(request *request.BidAcceptedRequest) (string, error) {
+	var bid model.BidPlaced
+	if err := n.NftOrdersRepository.DB.Where("id = ?", request.BidID).First(&bid).Error; err != nil {
+		return "", fmt.Errorf("query bid failed: %w", err)
+	}
+
+	var entry model.EntryOrders
+	if err := n.NftOrdersRepository.DB.Where("id = ?", bid.OrdersID).First(&entry).Error; err != nil {
+		return "", fmt.Errorf("query entry order failed: %w", err)
+	}
+
+	var entryRef model.ChainRefEntryOrder
+	if err := n.NftOrdersRepository.DB.Where("entry_order_id = ?", entry.ID).First(&entryRef).Error; err != nil {
+		return "", fmt.Errorf("query listing hash mapping failed: %w", err)
+	}
+
+	var nftContractAddrStr string
+	if err := n.NftOrdersRepository.DB.
+		Table("nft_list").
+		Select("nft.address").
+		Joins("JOIN nft ON nft.id = nft_list.nft_id").
+		Where("nft_list.id = ?", entry.NftListID).
+		Scan(&nftContractAddrStr).Error; err != nil {
+		return "", fmt.Errorf("query nft contract address failed (nftListId=%d): %w", entry.NftListID, err)
+	}
+	nftContractAddr := common.HexToAddress(nftContractAddrStr)
+	if nftContractAddr == (common.Address{}) {
+		return "", errors.New("invalid nft contract address")
+	}
+
+	txHash, err := utils.AcceptBidOnChain(entry, bid, nftContractAddr, common.HexToHash(entryRef.ListingHash))
+	if err != nil {
+		return "", fmt.Errorf("acceptBid on-chain failed: %w", err)
+	}
+	return txHash.Hex(), nil
 }
 
 // 获取挂单列表
@@ -76,6 +181,8 @@ func (n *NftOrdersService) GetEntryOrdersList(nftId *uint) ([]response.EntryOrde
 			Deadline:   m.Deadline,
 			Nonce:      m.Nonce,
 			Status:     m.Status,
+			StatusDesc: m.EntryOrders.Status.Desc(),
+			Signature:  m.Signature,
 			CreateTime: m.CreateTime,
 			UpdateTime: m.UpdateTime,
 			ImageUrl:   m.ImageUrl,

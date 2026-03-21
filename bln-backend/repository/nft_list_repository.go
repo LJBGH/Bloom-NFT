@@ -17,14 +17,23 @@ func NewNftListRepository(db *gorm.DB) *NftListRepository {
 	return &NftListRepository{DB: db}
 }
 
+type NftListWithEntryOrders struct {
+	model.NftList
+	EntryOrders model.EntryOrders `gorm:"foreignKey:NftListID"`
+}
+
 // 根据nftID获取NFTList
-func (n *NftListRepository) GetListByNftId(nftId uint) ([]model.NftList, error) {
-	var nftList []model.NftList
+func (n *NftListRepository) GetListByNftId(nftId uint) ([]NftListWithEntryOrders, error) {
 	// 使用结构体作为条件，让 GORM 根据字段映射到正确的列名（避免 nftId/nft_id 不一致）。
-	if err := n.DB.Where(&model.NftList{NftID: nftId}).Find(&nftList).Error; err != nil {
+	// 关联查询 entry_orders表，获取订单状态
+
+	var nftListWithEntryOrders []NftListWithEntryOrders
+	query := n.DB.Where(&model.NftList{NftID: nftId}).Joins("LEFT JOIN entry_orders ON entry_orders.nft_list_id = nft_list.id")
+	if err := query.Find(&nftListWithEntryOrders).Error; err != nil {
 		return nil, err
 	}
-	return nftList, nil
+
+	return nftListWithEntryOrders, nil
 }
 
 // 根据 owner 获取其拥有的 NFT 类目 ID 列表（去重按 nft_id）

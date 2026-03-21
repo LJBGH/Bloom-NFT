@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 
 	"bloom-nft/config"
 	"bloom-nft/database"
+	"bloom-nft/listener"
 	"bloom-nft/logger"
 
 	wire "bloom-nft/wire"
@@ -38,6 +40,13 @@ func main() {
 
 	// 然后再做自动迁移，这时 DB 已经不是 nil 了
 	database.AutoMigrate()
+
+	// 启动链上事件监听（后台运行，不阻塞 API）
+	go func() {
+		if err := listener.StartMarketplaceListener(context.Background()); err != nil {
+			log.Printf("start marketplace listener failed: %v", err)
+		}
+	}()
 
 	addr := fmt.Sprintf(":%s", config.AppConfig.Port)
 	log.Printf("swagger is running on http://localhost%s/swagger/index.html", addr)

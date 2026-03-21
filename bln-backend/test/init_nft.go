@@ -7,6 +7,7 @@ import (
 	"bloom-nft/model"
 	"bloom-nft/repository"
 	"bloom-nft/services"
+	"bloom-nft/utils"
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -33,7 +34,6 @@ type FileInfo struct {
 	fileData io.Reader
 }
 
-var nftContractAddress string = "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
 var rpcUrl string = "http://127.0.0.1:8545"
 var accountProviteKey string = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 var abiPath string = "../abi/BloomNFT.json"
@@ -48,6 +48,10 @@ func InitNft() {
 	nftListRepository := repository.NewNftListRepository(db)
 
 	nftService := services.NewNftService(nftReposity, nftListRepository)
+	nftContractAddress := utils.GetContractAddress("BloomNFT")
+	if nftContractAddress == "" {
+		panic("nft contract address is empty")
+	}
 
 	// 先插入NFT类目
 	nftReposity.Insert(model.Nft{
@@ -179,7 +183,7 @@ func InitNft() {
 	for index, value := range files {
 
 		// 1. 铸造NFT
-		result, err := nftService.Mint(&value.request, value.fileData)
+		result, err := nftService.Mint(&value.request, value.fileData, false)
 		if err != nil {
 			panic(err)
 		}
