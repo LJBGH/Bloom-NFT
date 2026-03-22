@@ -371,16 +371,16 @@ func BidWithSigOnChain(bid model.BidPlaced, listingHash common.Hash) (common.Has
 	}
 
 	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
-	tx, err := contract.Transact(auth, "placeBid", bidParam, sigBytes)
+	tx, err := contract.Transact(auth, "bidWithSig", bidParam, sigBytes)
 	if err != nil {
-		return common.Hash{}, fmt.Errorf("call placeBid transact failed: %w", err)
+		return common.Hash{}, fmt.Errorf("call bidWithSig transact failed: %w", err)
 	}
 	receipt, err := bind.WaitMined(ctx, client, tx)
 	if err != nil {
-		return tx.Hash(), fmt.Errorf("wait placeBid mined failed: %w", err)
+		return tx.Hash(), fmt.Errorf("wait bidWithSig mined failed: %w", err)
 	}
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		return tx.Hash(), errors.New("placeBid transaction reverted")
+		return tx.Hash(), errors.New("bidWithSig transaction reverted")
 	}
 	return tx.Hash(), nil
 }

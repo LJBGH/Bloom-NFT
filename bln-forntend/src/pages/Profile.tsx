@@ -1,9 +1,6 @@
 import {
   Alert,
   Box,
-  Card,
-  CardContent,
-  Chip,
   CircularProgress,
   Dialog,
   DialogActions,
@@ -14,10 +11,23 @@ import {
   TextField,
   Typography,
   Divider,
+  Paper,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Menu,
+  MenuItem,
+  Tabs,
+  Tab,
+  Link,
 } from "@mui/material";
+import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import { parseUnits, TypedDataEncoder } from "ethers";
 import { useWeb3 } from "../web3/provider";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { API_ENDPOINTS } from "../config/api";
 import {
   getBloomNFTContract,
@@ -48,23 +58,132 @@ interface EntryOrderItem {
   id: number;
   nftListId: number;
   seller: string;
+  buyer?: string;
   tokenId: number;
   price: number;
   deadline: string;
   nonce: number;
   status: number;
   statusDesc?: string;
+  txHash?: string;
+  createTime?: string;
+  updateTime?: string;
+  imageUrl?: string;
+  listingHash?: string;
+}
+
+interface BidPlacedItem {
+  id: number;
+  ordersId: number;
+  buyer: string;
+  price: number;
+  deadline: string;
+  nonce: number;
+  status: number;
+  txHash?: string;
+  createTime?: string;
+}
+
+const BID_STATUS_LABELS: Record<number, string> = {
+  0: "准备中",
+  1: "进行中",
+  2: "已成交",
+  3: "已过期",
+  4: "已取消",
+  5: "已失效",
+  6: "未中标",
+  7: "已退款",
+};
+
+/** 挂单 entry_orders 状态（与后端 enums.Status 一致；6/7 为出价侧状态，挂单一般不会写入） */
+const ORDER_STATUS_LABELS: Record<number, string> = {
+  0: "准备中",
+  1: "进行中",
+  2: "已成交",
+  3: "已过期",
+  4: "已取消",
+  5: "已失效",
+};
+
+/** 仅保留「当前钱包 + 进行中(1)」的挂单；同一 nftListId 取 id 最大的一条 */
+function buildActiveListingMap(
+  orders: EntryOrderItem[],
+  wallet: string
+): Record<number, EntryOrderItem> {
+  const w = wallet.toLowerCase();
+  const map: Record<number, EntryOrderItem> = {};
+  for (const o of orders) {
+    if (o.seller.toLowerCase() !== w) continue;
+    if (o.status !== 1) continue;
+    const prev = map[o.nftListId];
+    if (!prev || o.id > prev.id) {
+      map[o.nftListId] = o;
+    }
+  }
+  return map;
+}
+
+interface MyBidHistoryRow {
+  id: number;
+  ordersId: number;
+  buyer: string;
+  price: number;
+  deadline: string;
+  nonce: number;
+  status: number;
+  statusDesc?: string;
+  nftListId: number;
+  tokenId: number;
+  entrySeller: string;
+  imageUrl?: string;
+  createTime?: string;
+}
+
+/** 持有的 NFT + 所属类目（前端聚合多类目接口） */
+interface OwnedNftRow extends NftItem {
+  categoryId: number;
+  categoryName: string;
+}
+
+function entryOrderToNftItem(o: EntryOrderItem, name: string): NftItem {
+  return {
+    id: o.nftListId,
+    name,
+    description: "",
+    imageUrl: o.imageUrl || "",
+    metadataUrl: "",
+    tokenUrl: "",
+    tokenId: o.tokenId,
+  };
 }
 
 export function Profile() {
   const { account, isConnected, chainId, signer } = useWeb3();
   const [loading, setLoading] = useState(false);
   const [categories, setCategories] = useState<NftCategory[]>([]);
-  const [selectedCategoryId, setSelectedCategoryId] = useState<number | null>(
-    null
-  );
-  const [nftList, setNftList] = useState<NftItem[]>([]);
-  const [orderByNftListId, setOrderByNftListId] = useState<Record<number, EntryOrderItem>>({});
+  /** 全部持有的 NFT（所有类目合并） */
+  const [allOwnedNfts, setAllOwnedNfts] = useState<OwnedNftRow[]>([]);
+  const [profileTab, setProfileTab] = useState(0);
+  const [activeListingByNftListId, setActiveListingByNftListId] = useState<
+    Record<number, EntryOrderItem>
+  >({});
+
+  const [historyOrdersOpen, setHistoryOrdersOpen] = useState(false);
+  const [historyBidsOpen, setHistoryBidsOpen] = useState(false);
+  const [historyOrders, setHistoryOrders] = useState<EntryOrderItem[]>([]);
+  const [historyBids, setHistoryBids] = useState<MyBidHistoryRow[]>([]);
+  const [historyOrdersLoading, setHistoryOrdersLoading] = useState(false);
+  const [historyBidsLoading, setHistoryBidsLoading] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  /** NFT 卡片「操作」下拉菜单（进行中挂单时） */
+  const [actionMenu, setActionMenu] = useState<{
+    anchor: HTMLElement | null;
+    nft: NftItem | null;
+  }>({ anchor: null, nft: null });
+
+  const closeActionMenu = () =>
+    setActionMenu({ anchor: null, nft: null });
   const [error, setError] = useState<string | null>(null);
 
   // --- Entry order dialog state ---
@@ -75,8 +194,22 @@ export function Profile() {
   const [orderError, setOrderError] = useState<string | null>(null);
   const [orderSuccess, setOrderSuccess] = useState<string | null>(null);
 
+  // --- 出价列表对话框 ---
+  const [bidDialogOpen, setBidDialogOpen] = useState(false);
+  const [bidDialogNft, setBidDialogNft] = useState<NftItem | null>(null);
+  const [bidList, setBidList] = useState<BidPlacedItem[]>([]);
+  const [bidLoading, setBidLoading] = useState(false);
+  const [bidError, setBidError] = useState<string | null>(null);
+  const [acceptBidId, setAcceptBidId] = useState<number | null>(null);
+
   const [price, setPrice] = useState("1");
   const [deadlineLocal, setDeadlineLocal] = useState("");
+
+  /** 拥有的 NFT — 查看详情弹窗 */
+  const [ownedDetailOpen, setOwnedDetailOpen] = useState(false);
+  const [ownedDetailNft, setOwnedDetailNft] = useState<OwnedNftRow | null>(
+    null
+  );
 
   const pad2 = (n: number) => String(n).padStart(2, "0");
   const toDateTimeLocal = (d: Date) => {
@@ -90,6 +223,101 @@ export function Profile() {
     d.setDate(d.getDate() + 1); // 默认 +1 天
     return toDateTimeLocal(d);
   };
+
+  const fetchHistoryOrders = async () => {
+    if (!account) return;
+    setHistoryOrdersLoading(true);
+    setHistoryError(null);
+    try {
+      const resp = await fetch(API_ENDPOINTS.myEntryOrders(account));
+      const data = await resp.json();
+      if (!resp.ok || data?.code !== 0) {
+        throw new Error(data?.message || "获取历史挂单失败");
+      }
+      setHistoryOrders((data.data as EntryOrderItem[]) || []);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setHistoryError(msg || "获取历史挂单失败");
+      setHistoryOrders([]);
+    } finally {
+      setHistoryOrdersLoading(false);
+    }
+  };
+
+  const fetchHistoryBids = async () => {
+    if (!account) return;
+    setHistoryBidsLoading(true);
+    setHistoryError(null);
+    try {
+      const resp = await fetch(API_ENDPOINTS.myBidHistory(account));
+      const data = await resp.json();
+      if (!resp.ok || data?.code !== 0) {
+        throw new Error(data?.message || "获取历史出价失败");
+      }
+      setHistoryBids((data.data as MyBidHistoryRow[]) || []);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setHistoryError(msg || "获取历史出价失败");
+      setHistoryBids([]);
+    } finally {
+      setHistoryBidsLoading(false);
+    }
+  };
+
+  /** 拉取全量挂单 + 所有类目下的持有 NFT（沿用现有接口，无需改后端） */
+  const refreshPortfolio = useCallback(async () => {
+    if (!account || categories.length === 0) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const orderResp = await fetch(API_ENDPOINTS.orderList());
+      const orderData = await orderResp.json();
+      if (!orderResp.ok || orderData.code !== 0) {
+        throw new Error(orderData.message || "获取挂单列表失败");
+      }
+      const orders: EntryOrderItem[] = orderData.data || [];
+      setActiveListingByNftListId(buildActiveListingMap(orders, account));
+
+      const merged: OwnedNftRow[] = [];
+      for (const cat of categories) {
+        const nftResp = await fetch(
+          `${API_ENDPOINTS.nftUserListByCategory(cat.id)}?owner=${account}`
+        );
+        const nftData = await nftResp.json();
+        if (!nftResp.ok || nftData.code !== 0) {
+          throw new Error(nftData.message || "获取 NFT 列表失败");
+        }
+        const list = (nftData.data as NftItem[]) || [];
+        for (const item of list) {
+          merged.push({
+            ...item,
+            categoryId: cat.id,
+            categoryName: cat.name,
+          });
+        }
+      }
+      setAllOwnedNfts(merged);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setError(msg || "刷新数据失败");
+    } finally {
+      setLoading(false);
+    }
+  }, [account, categories]);
+
+  const listedOrders = useMemo(
+    () =>
+      Object.values(activeListingByNftListId).sort((a, b) => b.id - a.id),
+    [activeListingByNftListId]
+  );
+
+  const nftNameByListId = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const n of allOwnedNfts) {
+      m.set(n.id, n.name);
+    }
+    return m;
+  }, [allOwnedNfts]);
 
   const openEntryOrderDialog = (nft: NftItem) => {
     setSelectedNft(nft);
@@ -230,6 +458,7 @@ export function Profile() {
       }
       setOrderSuccess("挂单成功");
       setOrderDialogOpen(false);
+      await refreshPortfolio();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : undefined;
       setOrderError(msg || "挂单失败");
@@ -244,7 +473,7 @@ export function Profile() {
       return;
     }
 
-    const order = orderByNftListId[nft.id];
+    const order = activeListingByNftListId[nft.id];
     if (!order) {
       setError("未找到对应挂单信息，无法取消上架。");
       return;
@@ -275,26 +504,7 @@ export function Profile() {
       const tx = await marketplace.cancelListing(listing);
       await tx.wait();
 
-      // 等后端监听链上事件后，刷新数据展示最新状态
-      if (selectedCategoryId != null) {
-        const [nftResp, orderResp] = await Promise.all([
-          fetch(`${API_ENDPOINTS.nftUserListByCategory(selectedCategoryId)}?owner=${account}`),
-          fetch(API_ENDPOINTS.orderList()),
-        ]);
-        const nftData = await nftResp.json();
-        const orderData = await orderResp.json();
-        if (nftResp.ok && nftData?.code === 0) {
-          setNftList((nftData.data as NftItem[]) || []);
-        }
-        if (orderResp.ok && orderData?.code === 0) {
-          const orders = (orderData.data as EntryOrderItem[]) || [];
-          const map: Record<number, EntryOrderItem> = {};
-          for (const o of orders) {
-            map[o.nftListId] = o;
-          }
-          setOrderByNftListId(map);
-        }
-      }
+      await refreshPortfolio();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : undefined;
       setError(msg || "取消上架失败");
@@ -303,11 +513,64 @@ export function Profile() {
     }
   };
 
+  const loadBidsForDialog = async (nft: NftItem) => {
+    if (!account) return;
+    setBidLoading(true);
+    setBidError(null);
+    try {
+      const resp = await fetch(API_ENDPOINTS.bidListForSeller(nft.id, account));
+      const data = await resp.json();
+      if (!resp.ok || data?.code !== 0) {
+        throw new Error(data?.message || "获取出价列表失败");
+      }
+      setBidList((data.data as BidPlacedItem[]) || []);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setBidError(msg || "获取出价列表失败");
+      setBidList([]);
+    } finally {
+      setBidLoading(false);
+    }
+  };
+
+  const openBidDialog = (nft: NftItem) => {
+    if (!account) return;
+    setBidDialogNft(nft);
+    setBidDialogOpen(true);
+    setBidError(null);
+    setBidList([]);
+    void loadBidsForDialog(nft);
+  };
+
+  const handleAcceptBid = async (bid: BidPlacedItem) => {
+    if (!account || !bidDialogNft) return;
+    setAcceptBidId(bid.id);
+    setBidError(null);
+    try {
+      const resp = await fetch(API_ENDPOINTS.bidAccepted, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bidId: bid.id, seller: account }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data?.code !== 0) {
+        throw new Error(data?.message || "接受出价失败");
+      }
+      await loadBidsForDialog(bidDialogNft);
+      await refreshPortfolio();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setBidError(msg || "接受出价失败");
+    } finally {
+      setAcceptBidId(null);
+    }
+  };
+
   useEffect(() => {
     if (!isConnected || !account) {
       setCategories([]);
-      setNftList([]);
-      setSelectedCategoryId(null);
+      setAllOwnedNfts([]);
+      setActiveListingByNftListId({});
       return;
     }
 
@@ -324,11 +587,8 @@ export function Profile() {
         }
         const list: NftCategory[] = data.data || [];
         setCategories(list);
-        if (list.length > 0) {
-          setSelectedCategoryId(list[0].id);
-        } else {
-          setSelectedCategoryId(null);
-          setNftList([]);
+        if (list.length === 0) {
+          setAllOwnedNfts([]);
         }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : undefined;
@@ -338,57 +598,56 @@ export function Profile() {
       }
     };
 
-    fetchCategories();
+    void fetchCategories();
   }, [isConnected, account]);
 
   useEffect(() => {
-    if (!isConnected || !account || selectedCategoryId == null) {
-      setNftList([]);
-      setOrderByNftListId({});
+    if (!isConnected || !account || categories.length === 0) {
+      setAllOwnedNfts([]);
+      setActiveListingByNftListId({});
       return;
     }
-
-    const fetchNftList = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const [nftResp, orderResp] = await Promise.all([
-          fetch(`${API_ENDPOINTS.nftUserListByCategory(selectedCategoryId)}?owner=${account}`),
-          fetch(API_ENDPOINTS.orderList()),
-        ]);
-        const nftData = await nftResp.json();
-        const orderData = await orderResp.json();
-        if (!nftResp.ok || nftData.code !== 0) {
-          throw new Error(nftData.message || "获取 NFT 列表失败");
-        }
-        const list: NftItem[] = nftData.data || [];
-        setNftList(list);
-
-        if (!orderResp.ok || orderData.code !== 0) {
-          throw new Error(orderData.message || "获取挂单列表失败");
-        }
-        const orders: EntryOrderItem[] = orderData.data || [];
-        const map: Record<number, EntryOrderItem> = {};
-        for (const o of orders) {
-          map[o.nftListId] = o;
-        }
-        setOrderByNftListId(map);
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : undefined;
-        setError(msg || "获取 NFT 列表失败");
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchNftList();
-  }, [isConnected, account, selectedCategoryId]);
+    void refreshPortfolio();
+  }, [isConnected, account, categories, refreshPortfolio]);
 
   return (
     <>
-      <Typography variant="h4" sx={{ mb: 3, fontWeight: 700 }}>
-        个人中心
-      </Typography>
+      <Stack
+        direction="row"
+        flexWrap="wrap"
+        alignItems="center"
+        justifyContent="space-between"
+        gap={2}
+        sx={{ mb: 3 }}
+      >
+        <Typography variant="h4" sx={{ fontWeight: 700 }}>
+          个人中心
+        </Typography>
+        {isConnected && (
+          <Stack direction="row" spacing={1}>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => {
+                setHistoryOrdersOpen(true);
+                void fetchHistoryOrders();
+              }}
+            >
+              历史挂单
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
+              onClick={() => {
+                setHistoryBidsOpen(true);
+                void fetchHistoryBids();
+              }}
+            >
+              历史出价
+            </Button>
+          </Stack>
+        )}
+      </Stack>
       {!isConnected ? (
         <Typography>请先连接钱包查看个人信息。</Typography>
       ) : (
@@ -409,133 +668,345 @@ export function Profile() {
             <Typography>当前地址暂无持有的 NFT 类目。</Typography>
           ) : (
             <>
-              <Box sx={{ mb: 3, display: "flex", gap: 1, flexWrap: "wrap" }}>
-                {categories.map((cat) => (
-                  <Chip
-                    key={cat.id}
-                    label={cat.name}
-                    color={cat.id === selectedCategoryId ? "primary" : "default"}
-                    onClick={() => setSelectedCategoryId(cat.id)}
-                    variant={
-                      cat.id === selectedCategoryId ? "filled" : "outlined"
-                    }
-                  />
-                ))}
-              </Box>
-
-              <Box
-                sx={{
-                  display: "grid",
-                  gridTemplateColumns: {
-                    xs: "repeat(auto-fill, minmax(180px, 1fr))",
-                    sm: "repeat(auto-fill, minmax(210px, 1fr))",
-                  },
-                  gap: 2,
-                  alignItems: "start",
-                }}
+              <Tabs
+                value={profileTab}
+                onChange={(_, v) => setProfileTab(v)}
+                sx={{ mb: 2 }}
               >
-                {nftList.map((nft) => (
-                  (() => {
-                    const order = orderByNftListId[nft.id];
-                    const status = order?.status ?? nft.status;
-                    const statusDesc =
-                      order?.statusDesc || nft.statusDesc || (status != null ? String(status) : "-");
-                    const canCancel = status === 1 && !!order;
-                    return (
-                  <Card
-                    key={nft.id}
-                    sx={{
-                      width: "100%",
-                      maxWidth: 210,
-                      minHeight: 320,
-                      display: "flex",
-                      flexDirection: "column",
-                      borderRadius: 2,
-                      border: "1px solid",
-                      borderColor: "divider",
-                      boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
-                    }}
-                  >
-                    <Box
-                      sx={{
-                        width: "100%",
-                        height: 210,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        p: 1.5,
-                        background:
-                          "linear-gradient(180deg, rgba(255,255,255,0.05) 0%, rgba(255,255,255,0.02) 100%)",
-                        borderTopLeftRadius: 2,
-                        borderTopRightRadius: 2,
-                      }}
-                    >
-                      <Box
-                        component="img"
-                        src={nft.imageUrl}
-                        alt={nft.name}
-                        sx={{
-                          width: "100%",
-                          height: "100%",
-                          objectFit: "contain",
-                          borderRadius: 1,
-                        }}
-                      />
-                    </Box>
-                    <CardContent sx={{ flexGrow: 1, display: "flex", flexDirection: "column", gap: 1, pt: 1.5 }}>
-                      <Typography
-                        variant="h6"
-                        sx={{ fontWeight: 700, mb: 0.5 }}
-                      >
-                        {nft.name}
-                      </Typography>
-                      <Divider />
-                      <Stack direction="row" justifyContent="space-between" alignItems="center">
-                        <Typography variant="caption" color="text.secondary">
-                          Token ID: {nft.tokenId}
-                        </Typography>
-                        <Chip
-                          label={statusDesc}
-                          size="small"
-                          color={status === 1 ? "primary" : status === 2 ? "success" : "default"}
-                          variant={status === 1 || status === 2 ? "filled" : "outlined"}
-                        />
-                      </Stack>
+                <Tab label="我持有的" />
+                <Tab label={`我上架的 (${listedOrders.length})`} />
+              </Tabs>
 
-                      <Box sx={{ mt: "auto", display: "flex", gap: 1 }}>
-                        <Button
-                          variant="contained"
-                          size="small"
-                          disabled={!isConnected}
-                          onClick={() => openEntryOrderDialog(nft)}
-                          fullWidth={!canCancel}
-                          sx={{ borderRadius: 999, fontWeight: 700 }}
-                        >
-                          挂单
-                        </Button>
-                        {canCancel && (
-                          <Button
-                            variant="outlined"
-                            color="warning"
-                            size="small"
-                            disabled={cancelSubmittingId === nft.id}
-                            onClick={() => void handleCancelListing(nft)}
-                            sx={{ borderRadius: 999, fontWeight: 700, px: 1.5 }}
+              {profileTab === 0 && (
+                <TableContainer component={Paper} variant="outlined">
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell width={80}>图片</TableCell>
+                        <TableCell>名称</TableCell>
+                        <TableCell>类目</TableCell>
+                        <TableCell>Token ID</TableCell>
+                        <TableCell align="right" width={200}>
+                          操作
+                        </TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {allOwnedNfts.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={5} align="center">
+                            暂无持有的 NFT
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        allOwnedNfts.map((nft) => (
+                          <TableRow
+                            key={`${nft.categoryId}-${nft.id}`}
+                            hover
                           >
-                            {cancelSubmittingId === nft.id ? "取消中..." : "取消上架"}
-                          </Button>
-                        )}
-                      </Box>
-                    </CardContent>
-                  </Card>
-                    );
-                  })()
-                ))}
-              </Box>
+                            <TableCell>
+                              <Box
+                                component="img"
+                                src={nft.imageUrl}
+                                alt=""
+                                sx={{
+                                  width: 48,
+                                  height: 48,
+                                  objectFit: "cover",
+                                  borderRadius: 1,
+                                  display: "block",
+                                }}
+                              />
+                            </TableCell>
+                            <TableCell>{nft.name}</TableCell>
+                            <TableCell>{nft.categoryName}</TableCell>
+                            <TableCell>{nft.tokenId}</TableCell>
+                            <TableCell align="right">
+                              <Stack
+                                direction="row"
+                                spacing={1}
+                                justifyContent="flex-end"
+                                flexWrap="wrap"
+                                useFlexGap
+                              >
+                                <Button
+                                  variant="contained"
+                                  size="small"
+                                  disabled={!isConnected}
+                                  onClick={() => openEntryOrderDialog(nft)}
+                                >
+                                  挂单
+                                </Button>
+                                <Button
+                                  variant="outlined"
+                                  size="small"
+                                  onClick={() => {
+                                    setOwnedDetailNft(nft);
+                                    setOwnedDetailOpen(true);
+                                  }}
+                                >
+                                  查看详情
+                                </Button>
+                              </Stack>
+                            </TableCell>
+                          </TableRow>
+                        ))
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              )}
+
+              {profileTab === 1 && (
+                <TableContainer component={Paper} variant="outlined">
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell width={80}>图片</TableCell>
+                        <TableCell>名称</TableCell>
+                        <TableCell>Token ID</TableCell>
+                        <TableCell align="right">价格 (BT)</TableCell>
+                        <TableCell>截止时间</TableCell>
+                        <TableCell>状态</TableCell>
+                        <TableCell>订单 ID</TableCell>
+                        <TableCell align="right" width={140}>
+                          操作
+                        </TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {listedOrders.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={8} align="center">
+                            暂无进行中的上架
+                          </TableCell>
+                        </TableRow>
+                      ) : (
+                        listedOrders.map((order) => {
+                          const displayName =
+                            nftNameByListId.get(order.nftListId) ??
+                            `Token #${order.tokenId}`;
+                          const rowNft = entryOrderToNftItem(
+                            order,
+                            displayName
+                          );
+                          return (
+                            <TableRow key={order.id} hover>
+                              <TableCell>
+                                <Box
+                                  component="img"
+                                  src={order.imageUrl || ""}
+                                  alt=""
+                                  sx={{
+                                    width: 48,
+                                    height: 48,
+                                    objectFit: "cover",
+                                    borderRadius: 1,
+                                    display: "block",
+                                  }}
+                                />
+                              </TableCell>
+                              <TableCell>{displayName}</TableCell>
+                              <TableCell>{order.tokenId}</TableCell>
+                              <TableCell align="right">{order.price}</TableCell>
+                              <TableCell>
+                                {order.deadline
+                                  ? new Date(order.deadline).toLocaleString()
+                                  : "—"}
+                              </TableCell>
+                              <TableCell>
+                                {order.statusDesc ??
+                                  ORDER_STATUS_LABELS[order.status] ??
+                                  order.status}
+                              </TableCell>
+                              <TableCell>{order.id}</TableCell>
+                              <TableCell align="right">
+                                <Button
+                                  variant="contained"
+                                  size="small"
+                                  disabled={!isConnected}
+                                  endIcon={<KeyboardArrowDownIcon />}
+                                  onClick={(e) =>
+                                    setActionMenu({
+                                      anchor: e.currentTarget,
+                                      nft: rowNft,
+                                    })
+                                  }
+                                  sx={{
+                                    minWidth: 100,
+                                    justifyContent: "space-between",
+                                  }}
+                                >
+                                  操作
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              )}
             </>
           )}
         </>
       )}
+
+      <Dialog
+        open={ownedDetailOpen}
+        onClose={() => {
+          setOwnedDetailOpen(false);
+          setOwnedDetailNft(null);
+        }}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>NFT 详情</DialogTitle>
+        <DialogContent dividers>
+          {ownedDetailNft ? (
+            <Stack spacing={2} sx={{ pt: 0.5 }}>
+              <Box
+                component="img"
+                src={ownedDetailNft.imageUrl}
+                alt={ownedDetailNft.name}
+                sx={{
+                  width: "100%",
+                  maxHeight: 280,
+                  objectFit: "contain",
+                  borderRadius: 1,
+                  bgcolor: "action.hover",
+                }}
+              />
+              <Typography variant="h6">{ownedDetailNft.name}</Typography>
+              <Typography variant="body2" color="text.secondary">
+                {ownedDetailNft.description || "暂无描述"}
+              </Typography>
+              <Divider />
+              <Stack spacing={0.75}>
+                <Typography variant="body2">
+                  <strong>类目：</strong>
+                  {ownedDetailNft.categoryName}
+                </Typography>
+                <Typography variant="body2">
+                  <strong>Token ID：</strong>
+                  {ownedDetailNft.tokenId}
+                </Typography>
+                <Typography variant="body2">
+                  <strong>列表 ID：</strong>
+                  {ownedDetailNft.id}
+                </Typography>
+                {ownedDetailNft.metadataUrl ? (
+                  <Typography variant="body2">
+                    <strong>元数据：</strong>
+                    <Link
+                      href={ownedDetailNft.metadataUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      打开链接
+                    </Link>
+                  </Typography>
+                ) : null}
+                {ownedDetailNft.tokenUrl ? (
+                  <Typography variant="body2" sx={{ wordBreak: "break-all" }}>
+                    <strong>Token URL：</strong>
+                    {ownedDetailNft.tokenUrl}
+                  </Typography>
+                ) : null}
+                {(() => {
+                  const ao = activeListingByNftListId[ownedDetailNft.id];
+                  if (!ao) {
+                    return (
+                      <Typography variant="body2" color="text.secondary">
+                        <strong>挂单：</strong>当前无进行中的上架（可在「上架中的
+                        NFT」中管理已上架项）
+                      </Typography>
+                    );
+                  }
+                  return (
+                    <Typography variant="body2">
+                      <strong>挂单状态：</strong>
+                      {ao.statusDesc ??
+                        ORDER_STATUS_LABELS[ao.status] ??
+                        ao.status}
+                      （订单 #{ao.id}，请到「上架中的 NFT」进行出价/取消等操作）
+                    </Typography>
+                  );
+                })()}
+              </Stack>
+            </Stack>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setOwnedDetailOpen(false);
+              setOwnedDetailNft(null);
+            }}
+          >
+            关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Menu
+        anchorEl={actionMenu.anchor}
+        open={Boolean(actionMenu.anchor)}
+        onClose={closeActionMenu}
+        anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+        transformOrigin={{ vertical: "top", horizontal: "right" }}
+        slotProps={{
+          paper: {
+            elevation: 8,
+            sx: { minWidth: 168, borderRadius: 2, mt: 0.5 },
+          },
+        }}
+      >
+        {actionMenu.nft
+          ? (() => {
+              const n = actionMenu.nft;
+              const ao = activeListingByNftListId[n.id];
+              const showViewBids =
+                !!account &&
+                !!ao &&
+                ao.status === 1 &&
+                ao.seller.toLowerCase() === account.toLowerCase();
+              return (
+                <>
+                  {showViewBids ? (
+                    <MenuItem
+                      onClick={() => {
+                        closeActionMenu();
+                        openBidDialog(n);
+                      }}
+                    >
+                      查看出价
+                    </MenuItem>
+                  ) : null}
+                  <MenuItem
+                    onClick={() => {
+                      closeActionMenu();
+                      void handleCancelListing(n);
+                    }}
+                    disabled={cancelSubmittingId === n.id}
+                  >
+                    {cancelSubmittingId === n.id ? "取消中…" : "取消上架"}
+                  </MenuItem>
+                  <Divider />
+                  <MenuItem
+                    onClick={() => {
+                      closeActionMenu();
+                      openEntryOrderDialog(n);
+                    }}
+                  >
+                    挂单
+                  </MenuItem>
+                </>
+              );
+            })()
+          : null}
+      </Menu>
 
       <Dialog open={orderDialogOpen} onClose={() => setOrderDialogOpen(false)} maxWidth="xs" fullWidth>
         <DialogTitle>填写挂单信息</DialogTitle>
@@ -571,6 +1042,281 @@ export function Profile() {
           </Button>
           <Button variant="contained" onClick={() => void handleSubmitEntryOrder()} disabled={orderSubmitting}>
             {orderSubmitting ? "提交中..." : "确认挂单"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={bidDialogOpen}
+        onClose={() => setBidDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          出价列表{bidDialogNft ? ` — ${bidDialogNft.name}` : ""}
+        </DialogTitle>
+        <DialogContent>
+          {bidError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {bidError}
+            </Alert>
+          )}
+          {bidLoading ? (
+            <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <TableContainer component={Paper} variant="outlined">
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>买家</TableCell>
+                    <TableCell align="right">价格 (BT)</TableCell>
+                    <TableCell>截止时间</TableCell>
+                    <TableCell>状态</TableCell>
+                    <TableCell align="right">操作</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {bidList.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} align="center">
+                        暂无出价
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    bidList.map((bid) => {
+                      const listingOrder = bidDialogNft
+                        ? activeListingByNftListId[bidDialogNft.id]
+                        : undefined;
+                      const canAccept =
+                        bid.status === 1 &&
+                        listingOrder?.status === 1;
+                      return (
+                        <TableRow key={bid.id}>
+                          <TableCell sx={{ maxWidth: 140, wordBreak: "break-all" }}>
+                            {bid.buyer}
+                          </TableCell>
+                          <TableCell align="right">{bid.price}</TableCell>
+                          <TableCell>
+                            {bid.deadline
+                              ? new Date(bid.deadline).toLocaleString()
+                              : "-"}
+                          </TableCell>
+                          <TableCell>
+                            {BID_STATUS_LABELS[bid.status] ?? String(bid.status)}
+                          </TableCell>
+                          <TableCell align="right">
+                            <Button
+                              size="small"
+                              variant="contained"
+                              color="success"
+                              disabled={
+                                !canAccept || acceptBidId === bid.id
+                              }
+                              onClick={() => void handleAcceptBid(bid)}
+                            >
+                              {acceptBidId === bid.id ? "处理中..." : "接受出价"}
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBidDialogOpen(false)}>关闭</Button>
+          <Button
+            onClick={() => bidDialogNft && void loadBidsForDialog(bidDialogNft)}
+            disabled={bidLoading || !bidDialogNft}
+          >
+            刷新
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={historyOrdersOpen}
+        onClose={() => setHistoryOrdersOpen(false)}
+        maxWidth="lg"
+        fullWidth
+      >
+        <DialogTitle>我的挂单记录</DialogTitle>
+        <DialogContent>
+          {historyError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {historyError}
+            </Alert>
+          )}
+          {historyOrdersLoading ? (
+            <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <TableContainer component={Paper} variant="outlined" sx={{ mt: 1 }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>订单ID</TableCell>
+                    <TableCell>NFT</TableCell>
+                    <TableCell>Token</TableCell>
+                    <TableCell align="right">价格(BT)</TableCell>
+                    <TableCell>状态</TableCell>
+                    <TableCell>截止时间</TableCell>
+                    <TableCell>买家</TableCell>
+                    <TableCell>创建时间</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {historyOrders.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={8} align="center">
+                        暂无挂单记录
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    historyOrders.map((row) => (
+                      <TableRow key={row.id}>
+                        <TableCell>{row.id}</TableCell>
+                        <TableCell>
+                          {row.imageUrl ? (
+                            <Box
+                              component="img"
+                              src={row.imageUrl}
+                              alt=""
+                              sx={{ width: 40, height: 40, objectFit: "cover", borderRadius: 1 }}
+                            />
+                          ) : (
+                            "-"
+                          )}
+                        </TableCell>
+                        <TableCell>{row.tokenId}</TableCell>
+                        <TableCell align="right">{row.price}</TableCell>
+                        <TableCell>
+                          {row.statusDesc ??
+                            ORDER_STATUS_LABELS[row.status] ??
+                            row.status}
+                        </TableCell>
+                        <TableCell>
+                          {row.deadline
+                            ? new Date(row.deadline).toLocaleString()
+                            : "-"}
+                        </TableCell>
+                        <TableCell sx={{ maxWidth: 120, wordBreak: "break-all" }}>
+                          {row.buyer || "-"}
+                        </TableCell>
+                        <TableCell>
+                          {row.createTime
+                            ? new Date(row.createTime).toLocaleString()
+                            : "-"}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setHistoryOrdersOpen(false)}>关闭</Button>
+          <Button onClick={() => void fetchHistoryOrders()} disabled={historyOrdersLoading}>
+            刷新
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={historyBidsOpen}
+        onClose={() => setHistoryBidsOpen(false)}
+        maxWidth="lg"
+        fullWidth
+      >
+        <DialogTitle>我的出价记录</DialogTitle>
+        <DialogContent>
+          {historyError && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              {historyError}
+            </Alert>
+          )}
+          {historyBidsLoading ? (
+            <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
+              <CircularProgress />
+            </Box>
+          ) : (
+            <TableContainer component={Paper} variant="outlined" sx={{ mt: 1 }}>
+              <Table size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell>NFT</TableCell>
+                    <TableCell>Token</TableCell>
+                    <TableCell>卖家</TableCell>
+                    <TableCell align="right">出价(BT)</TableCell>
+                    <TableCell>状态</TableCell>
+                    <TableCell>出价截止</TableCell>
+                    <TableCell>挂单ID</TableCell>
+                    <TableCell>创建时间</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {historyBids.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={8} align="center">
+                        暂无出价记录
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    historyBids.map((row) => (
+                      <TableRow key={row.id}>
+                        <TableCell>
+                          {row.imageUrl ? (
+                            <Box
+                              component="img"
+                              src={row.imageUrl}
+                              alt=""
+                              sx={{ width: 40, height: 40, objectFit: "cover", borderRadius: 1 }}
+                            />
+                          ) : (
+                            "-"
+                          )}
+                        </TableCell>
+                        <TableCell>{row.tokenId}</TableCell>
+                        <TableCell sx={{ maxWidth: 120, wordBreak: "break-all" }}>
+                          {row.entrySeller}
+                        </TableCell>
+                        <TableCell align="right">{row.price}</TableCell>
+                        <TableCell>
+                          {row.statusDesc ??
+                            BID_STATUS_LABELS[row.status] ??
+                            row.status}
+                        </TableCell>
+                        <TableCell>
+                          {row.deadline
+                            ? new Date(row.deadline).toLocaleString()
+                            : "-"}
+                        </TableCell>
+                        <TableCell>{row.ordersId}</TableCell>
+                        <TableCell>
+                          {row.createTime
+                            ? new Date(row.createTime).toLocaleString()
+                            : "-"}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setHistoryBidsOpen(false)}>关闭</Button>
+          <Button onClick={() => void fetchHistoryBids()} disabled={historyBidsLoading}>
+            刷新
           </Button>
         </DialogActions>
       </Dialog>

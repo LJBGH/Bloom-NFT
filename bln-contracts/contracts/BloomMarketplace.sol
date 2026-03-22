@@ -35,6 +35,8 @@ contract BloomMarketplace is Ownable, EIP712 {
     event BidCancelled(bytes32 indexed bidhash, address indexed buyer);
     // 接受出价
     event BidAccepted(bytes32 indexed listingHash, bytes32 indexed bidHash, address seller, address buyer);
+    // 未中标出价退款完成
+    event BidRefunded(bytes32 indexed bidHash, address indexed buyer, uint256 amount);
 
     // 上架信息
     struct Listing {
@@ -69,6 +71,9 @@ contract BloomMarketplace is Ownable, EIP712 {
 
     // 成交状态（仅针对 listingHash）
     mapping(bytes32 => bool) public sold;
+
+    /// @notice 某 listing 成交后的中标 bidHash（用于区分未中标出价，以便退款）
+    mapping(bytes32 => bytes32) public winningBidByListing;
 
     // 上架类型hash
     bytes32 private constant LISTING_TYPEHASH =
@@ -198,7 +203,6 @@ contract BloomMarketplace is Ownable, EIP712 {
     // 用户出价（签名订单）
     function bidWithSig(Bid calldata bid, bytes calldata signature) external  returns(bytes32 bidHash){
         require(bid.buyer != address(0), "buyer=0");
-        require(msg.sender == bid.buyer, "not buyer");
         require(bid.price > 0, "price=0");
         require(bid.deadline >= block.timestamp, "expired");
         require(listings[bid.listingHash], "not listing");
@@ -246,6 +250,28 @@ contract BloomMarketplace is Ownable, EIP712 {
         emit BidCancelled(bidHash, msg.sender);
     }
 
+    /// @notice 挂单已成交后，未中标的买家取回托管的 BT（原 cancelBid 在 sold 后禁止调用）
+    /// @dev acceptBid 会写入 winningBid；若通过 buy() 成交则 winner 为空，此时任意仍托管的出价均可退款
+    function refundLosingBid(Bid calldata bid, bytes calldata bidSignature) external {
+        bytes32 bidHash = _verifyBid(bid, bidSignature);
+        require(sold[bid.listingHash], "listing not sold");
+        bytes32 winner = winningBidByListing[bid.listingHash];
+        if (winner != bytes32(0)) {
+            require(bidHash != winner, "winning bid");
+        }
+        require(bids[bidHash], "not bid");
+        require(msg.sender == bid.buyer, "not buyer");
+
+        uint256 escrowAmount = bidEscrow[bidHash];
+        require(escrowAmount > 0, "no escrow");
+
+        bids[bidHash] = false;
+        bidEscrow[bidHash] = 0;
+
+        require(token.transfer(bid.buyer, escrowAmount), "refund failed");
+        emit BidRefunded(bidHash, bid.buyer, escrowAmount);
+    }
+
     // 卖家接受出价（链下订单：Listing + Bid 都由双方签名）
     function acceptBid(
         Listing calldata listing,
@@ -269,6 +295,9 @@ contract BloomMarketplace is Ownable, EIP712 {
 
         uint256 escrowAmount = bidEscrow[bidHash];
         require(escrowAmount == bid.price, "bad escrow");
+
+        // 先记录中标 bidHash，再清空托管（便于未中标出价后续退款时校验）
+        winningBidByListing[listingHash] = bidHash;
 
         // 3. 结算：从托管款分账，市场抽成，卖家收款，NFT 转给买家
         uint256 fee = bid.price * feeRate / feePrecision;

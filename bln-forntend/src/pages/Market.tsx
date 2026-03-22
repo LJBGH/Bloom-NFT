@@ -48,6 +48,8 @@ interface EntryOrder {
   createTime: string;
   updateTime: string;
   imageUrl: string;
+  /** 链上 listingHash，未上链同步前可能为空 */
+  listingHash?: string;
 }
 
 interface BidItem {
@@ -59,6 +61,7 @@ interface BidItem {
   nonce: number;
   status: number;
   txHash?: string;
+  signature?: string;
 }
 
 function bidStatusText(status: number) {
@@ -69,10 +72,16 @@ function bidStatusText(status: number) {
       return "进行中";
     case 2:
       return "已成交";
+    case 3:
+      return "已过期";
     case 4:
       return "已取消";
     case 5:
       return "已失效";
+    case 6:
+      return "未中标";
+    case 7:
+      return "已退款";
     default:
       return String(status);
   }
@@ -100,6 +109,7 @@ export function Market() {
   const [detailOrder, setDetailOrder] = useState<EntryOrder | null>(null);
   const [bidList, setBidList] = useState<BidItem[]>([]);
   const [bidListLoading, setBidListLoading] = useState(false);
+  const [refundBidId, setRefundBidId] = useState<number | null>(null);
 
   const defaultDeadlineLocal = () => {
     const d = new Date();
@@ -202,14 +212,23 @@ export function Market() {
       setError(null);
       setSuccess(null);
 
-      const marketplace = getBloomMarketplaceContract(signer, chainId);
       const marketplaceAddress = getBloomMarketplaceAddress(chainId);
-      const onChainNonce = await marketplace.nonces(account);
-      const nonceNum = Number(onChainNonce);
       const deadlineMs = new Date(bidDeadlineLocal).getTime();
       const deadlineSec = Math.floor(deadlineMs / 1000);
       const deadlineIso = new Date(deadlineSec * 1000).toISOString();
       const priceWei = parseUnits(String(priceNum), 18);
+
+      // bidWithSig 会 transferFrom(买家 -> 市场)，必须先授权 BloomToken 给市场合约（与「购买」一致）
+      const tokenContract = getBloomTokenContract(signer, chainId);
+      const allowance: bigint = await tokenContract.allowance(account, marketplaceAddress);
+      if (allowance < priceWei) {
+        const approveTx = await tokenContract.approve(marketplaceAddress, priceWei);
+        await approveTx.wait();
+      }
+
+      const marketplace = getBloomMarketplaceContract(signer, chainId);
+      const onChainNonce = await marketplace.nonces(account);
+      const nonceNum = Number(onChainNonce);
       const listing = {
         nft: getBloomNFTAddress(chainId),
         seller: selectedOrder.seller,
@@ -286,6 +305,47 @@ export function Market() {
       setError(msg || "出价失败");
     } finally {
       setBidSubmittingId(null);
+    }
+  };
+
+  const handleRefundLosingBid = async (bid: BidItem) => {
+    if (!detailOrder || !signer || chainId == null || !account) {
+      setError("请先连接钱包。");
+      return;
+    }
+    if (!detailOrder.listingHash) {
+      setError("缺少 listingHash（挂单可能尚未完成链上同步），请稍后重试或刷新列表。");
+      return;
+    }
+    if (!bid.signature) {
+      setError("缺少出价签名数据，无法退款。");
+      return;
+    }
+    setRefundBidId(bid.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      const mp = getBloomMarketplaceContract(signer, chainId);
+      const lh = detailOrder.listingHash.startsWith("0x")
+        ? detailOrder.listingHash
+        : `0x${detailOrder.listingHash}`;
+      const bidStruct = {
+        listingHash: lh,
+        buyer: bid.buyer,
+        price: parseUnits(String(bid.price), 18),
+        deadline: BigInt(Math.floor(new Date(bid.deadline).getTime() / 1000)),
+        nonce: BigInt(bid.nonce),
+      };
+      const sig = bid.signature.startsWith("0x") ? bid.signature : `0x${bid.signature}`;
+      const tx = await mp.refundLosingBid(bidStruct, sig);
+      await tx.wait();
+      setSuccess("托管款已退回至钱包，数据库状态将在监听器同步后更新。");
+      await openOrderDetail(detailOrder);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setError(msg || "领取退款失败");
+    } finally {
+      setRefundBidId(null);
     }
   };
 
@@ -447,17 +507,37 @@ export function Market() {
                     <TableCell>出价</TableCell>
                     <TableCell>截止时间</TableCell>
                     <TableCell>状态</TableCell>
+                    <TableCell align="right">操作</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {bidList.map((b) => (
+                  {bidList.map((b) => {
+                    const canRefund =
+                      b.status === 6 &&
+                      account &&
+                      b.buyer.toLowerCase() === account.toLowerCase();
+                    return (
                     <TableRow key={b.id}>
                       <TableCell>{b.buyer}</TableCell>
                       <TableCell>{b.price} BT</TableCell>
                       <TableCell>{formatDateTime(b.deadline)}</TableCell>
                       <TableCell>{bidStatusText(b.status)}</TableCell>
+                      <TableCell align="right">
+                        {canRefund && (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="secondary"
+                            disabled={refundBidId === b.id}
+                            onClick={() => void handleRefundLosingBid(b)}
+                          >
+                            {refundBidId === b.id ? "退款中..." : "领取托管退款"}
+                          </Button>
+                        )}
+                      </TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
                 </TableBody>
               </Table>
             </TableContainer>

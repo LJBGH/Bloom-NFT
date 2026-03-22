@@ -6,10 +6,12 @@ import (
 	middleware "bloom-nft/middleware/exception"
 	"bloom-nft/model"
 	"bloom-nft/services"
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 type NftOrdersHandler struct {
@@ -150,5 +152,55 @@ func (n *NftOrdersHandler) GetBidPlacedList(c *gin.Context) {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
 
+	c.JSON(http.StatusOK, model.OkWithData(list))
+}
+
+// GetBidPlacedListForSellerNftList 卖家查询某 NFT 列表项（nft_list_id）对应挂单上的出价列表
+// Query: nftListId, seller（必填；后端校验该卖家拥有该 nft_list 下的挂单）
+func (n *NftOrdersHandler) GetBidPlacedListForSellerNftList(c *gin.Context) {
+	nftListIdStr := c.Query("nftListId")
+	seller := c.Query("seller")
+	if nftListIdStr == "" || seller == "" {
+		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+	}
+	nftListIdParsed, err := strconv.ParseUint(nftListIdStr, 10, 0)
+	if err != nil {
+		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+	}
+
+	list, err := n.NftOrdersService.GetBidPlacedListForSellerNftList(uint(nftListIdParsed), seller)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+		}
+		panic(middleware.NewBusinessError(enums.FAILED, err))
+	}
+
+	c.JSON(http.StatusOK, model.OkWithData(list))
+}
+
+// GetMyEntryOrders 当前用户作为卖家的挂单历史（query: seller 必填）
+func (n *NftOrdersHandler) GetMyEntryOrders(c *gin.Context) {
+	seller := c.Query("seller")
+	if seller == "" {
+		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+	}
+	list, err := n.NftOrdersService.GetMyEntryOrdersBySeller(seller)
+	if err != nil {
+		panic(middleware.NewBusinessError(enums.FAILED, err))
+	}
+	c.JSON(http.StatusOK, model.OkWithData(list))
+}
+
+// GetMyBidHistory 当前用户作为买家的出价历史（query: buyer 必填）
+func (n *NftOrdersHandler) GetMyBidHistory(c *gin.Context) {
+	buyer := c.Query("buyer")
+	if buyer == "" {
+		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+	}
+	list, err := n.NftOrdersService.GetMyBidHistoryByBuyer(buyer)
+	if err != nil {
+		panic(middleware.NewBusinessError(enums.FAILED, err))
+	}
 	c.JSON(http.StatusOK, model.OkWithData(list))
 }

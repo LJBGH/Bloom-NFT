@@ -57,19 +57,22 @@ func SetupRouter(
 		api.GET("/wallet/account/all", walletHandler.AllAccounts)
 		api.GET("/wallet/account/switch", walletHandler.SwitchCurrentAccount)
 
-		api.POST("/nft/mint", nftHander.Mint)
-		api.POST("/nft/update", nftHander.UpdateNftList)
-		api.GET("/nft/all", nftHander.AllNft)
-		api.GET("/nft/listall/:nftId", nftHander.AllNftList)
-		api.GET("/nft/user/categories", nftHander.UserCategories)
-		api.GET("/nft/user/list/:nftId", nftHander.UserNftList)
+		api.POST("/nft/mint", nftHander.Mint)                     // 铸造 NFT
+		api.POST("/nft/update", nftHander.UpdateNftList)          // 更新 NFT
+		api.GET("/nft/all", nftHander.AllNft)                     // 获取所有 NFT 系列
+		api.GET("/nft/listall/:nftId", nftHander.AllNftList)      // 获取指定 NFT 系列下的所有 NFT
+		api.GET("/nft/user/categories", nftHander.UserCategories) // 获取用户拥有的 NFT 类目列表
+		api.GET("/nft/user/list/:nftId", nftHander.UserNftList)   // 获取用户在该 NFT 类目下的所有 NFT 列表
 
-		api.GET("/order/orderlist/:nftId", nftOrdersHandler.GetEntryOrdersList) //挂单列表
-		api.GET("/order/orderlist", nftOrdersHandler.GetEntryOrdersList)        //挂单列表（nftId 可选）
-		api.GET("/order/bidlist/:ordersId", nftOrdersHandler.GetBidPlacedList)  //出价列表
-		api.POST("/order/entryorders", nftOrdersHandler.EntryOrders)            // 挂单
-		api.POST("/order/bidplaced", nftOrdersHandler.BidPlaced)                // 出价
-		api.POST("/order/bidaccepted", nftOrdersHandler.BidAccepted)            // 接受出价
+		api.GET("/order/orderlist/:nftId", nftOrdersHandler.GetEntryOrdersList)                 //挂单列表
+		api.GET("/order/orderlist", nftOrdersHandler.GetEntryOrdersList)                        //挂单列表（nftId 可选）
+		api.GET("/order/bidlist-for-seller", nftOrdersHandler.GetBidPlacedListForSellerNftList) // 卖家按 nft_list_id 查出价
+		api.GET("/order/my-entryorders", nftOrdersHandler.GetMyEntryOrders)                     // 我的挂单历史
+		api.GET("/order/my-bids", nftOrdersHandler.GetMyBidHistory)                             // 我的出价历史
+		api.GET("/order/bidlist/:ordersId", nftOrdersHandler.GetBidPlacedList)                  //出价列表
+		api.POST("/order/entryorders", nftOrdersHandler.EntryOrders)                            // 挂单
+		api.POST("/order/bidplaced", nftOrdersHandler.BidPlaced)                                // 出价
+		api.POST("/order/bidaccepted", nftOrdersHandler.BidAccepted)                            // 接受出价
 	}
 	return r
 }

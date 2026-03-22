@@ -9,9 +9,11 @@ import (
 	"bloom-nft/utils"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"gorm.io/gorm"
 )
 
 type NftOrdersService struct {
@@ -136,6 +138,16 @@ func (n *NftOrdersService) BidAccepted(request *request.BidAcceptedRequest) (str
 		return "", fmt.Errorf("query entry order failed: %w", err)
 	}
 
+	if !strings.EqualFold(entry.Seller, request.Seller) {
+		return "", errors.New("seller mismatch: only listing seller can accept this bid")
+	}
+	if entry.Status != enums.Pending {
+		return "", fmt.Errorf("listing is not active (orderId=%d, status=%d)", entry.ID, entry.Status)
+	}
+	if bid.Status != enums.Pending {
+		return "", fmt.Errorf("bid is not active (bidId=%d, status=%d)", bid.ID, bid.Status)
+	}
+
 	var entryRef model.ChainRefEntryOrder
 	if err := n.NftOrdersRepository.DB.Where("entry_order_id = ?", entry.ID).First(&entryRef).Error; err != nil {
 		return "", fmt.Errorf("query listing hash mapping failed: %w", err)
@@ -162,36 +174,92 @@ func (n *NftOrdersService) BidAccepted(request *request.BidAcceptedRequest) (str
 	return txHash.Hex(), nil
 }
 
+func entryOrdersWithImageToResponse(entryOrders []repository.EntryOrdersWithImageUrl) []response.EntryOrdersResponse {
+	resp := make([]response.EntryOrdersResponse, 0, len(entryOrders))
+	for _, m := range entryOrders {
+		resp = append(resp, response.EntryOrdersResponse{
+			ID:          m.ID,
+			NftListID:   m.NftListID,
+			Seller:      m.Seller,
+			Buyer:       m.Buyer,
+			TokenId:     m.TokenId,
+			Price:       m.Price,
+			Deadline:    m.Deadline,
+			Nonce:       m.Nonce,
+			Status:      m.Status,
+			StatusDesc:  m.EntryOrders.Status.Desc(),
+			TxHash:      m.TxHash,
+			Signature:   m.Signature,
+			CreateTime:  m.CreateTime,
+			UpdateTime:  m.UpdateTime,
+			ImageUrl:    m.ImageUrl,
+			ListingHash: m.ListingHash,
+		})
+	}
+	return resp
+}
+
 // 获取挂单列表
 func (n *NftOrdersService) GetEntryOrdersList(nftId *uint) ([]response.EntryOrdersResponse, error) {
 	entryOrders, err := n.NftOrdersRepository.GetEntryOrdersList(nftId)
 	if err != nil {
 		return nil, err
 	}
+	return entryOrdersWithImageToResponse(entryOrders), nil
+}
 
-	resp := make([]response.EntryOrdersResponse, 0, len(entryOrders))
-	for _, m := range entryOrders {
-		resp = append(resp, response.EntryOrdersResponse{
-			ID:         m.ID,
-			NftListID:  m.NftListID,
-			Seller:     m.Seller,
-			Buyer:      m.Buyer,
-			TokenId:    m.TokenId,
-			Price:      m.Price,
-			Deadline:   m.Deadline,
-			Nonce:      m.Nonce,
-			Status:     m.Status,
-			StatusDesc: m.EntryOrders.Status.Desc(),
-			Signature:  m.Signature,
-			CreateTime: m.CreateTime,
-			UpdateTime: m.UpdateTime,
-			ImageUrl:   m.ImageUrl,
+// GetMyEntryOrdersBySeller 当前地址作为卖家的全部挂单（含历史）
+func (n *NftOrdersService) GetMyEntryOrdersBySeller(seller string) ([]response.EntryOrdersResponse, error) {
+	rows, err := n.NftOrdersRepository.GetEntryOrdersBySeller(seller)
+	if err != nil {
+		return nil, err
+	}
+	return entryOrdersWithImageToResponse(rows), nil
+}
+
+// GetMyBidHistoryByBuyer 当前地址作为买家的全部出价
+func (n *NftOrdersService) GetMyBidHistoryByBuyer(buyer string) ([]response.BidHistoryResponse, error) {
+	rows, err := n.NftOrdersRepository.GetBidHistoryByBuyer(buyer)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]response.BidHistoryResponse, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, response.BidHistoryResponse{
+			ID:          r.ID,
+			OrdersID:    r.OrdersID,
+			Buyer:       r.Buyer,
+			Price:       r.Price,
+			Deadline:    r.Deadline,
+			Nonce:       r.Nonce,
+			Status:      r.Status,
+			StatusDesc:  r.Status.Desc(),
+			Signature:   r.Signature,
+			TxHash:      r.TxHash,
+			CreateTime:  r.CreateTime,
+			UpdateTime:  r.UpdateTime,
+			NftListID:   r.NftListID,
+			TokenId:     r.TokenId,
+			EntrySeller: r.Seller,
+			ImageUrl:    r.ImageUrl,
 		})
 	}
-	return resp, nil
+	return out, nil
 }
 
 // 获取出价列表
 func (n *NftOrdersService) GetBidPlacedList(ordersId uint) ([]model.BidPlaced, error) {
 	return n.NftOrdersRepository.GetBidPlacedList(ordersId)
+}
+
+// GetBidPlacedListForSellerNftList 卖家按自己的 nft_list_id 查询该挂单下的出价（校验 nft_list_id + seller）
+func (n *NftOrdersService) GetBidPlacedListForSellerNftList(nftListId uint, seller string) ([]model.BidPlaced, error) {
+	entry, err := n.NftOrdersRepository.GetEntryOrderByNftListAndSeller(nftListId, seller)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("no entry order for this nft list or seller mismatch: %w", err)
+		}
+		return nil, err
+	}
+	return n.NftOrdersRepository.GetBidPlacedList(entry.ID)
 }

@@ -218,17 +218,19 @@ func (l *MarketplaceListener) handleLog(vLog types.Log) error {
 	// 按事件类型分发到对应业务处理函数。
 	switch ev.Name {
 	case "Listed":
-		err = l.onListed(vLog, ev)
+		err = l.onListed(vLog, ev) // 上架事件
 	case "ListingCancelled":
-		err = l.onListingCancelled(vLog)
+		err = l.onListingCancelled(vLog) // 取消上架事件
 	case "Buy":
-		err = l.onBuy(vLog)
+		err = l.onBuy(vLog) // 购买事件
 	case "BidPlaced":
-		err = l.onBidPlaced(vLog, ev)
+		err = l.onBidPlaced(vLog, ev) // 出价事件
 	case "BidCancelled":
-		err = l.onBidCancelled(vLog)
+		err = l.onBidCancelled(vLog) // 撤回出价事件
 	case "BidAccepted":
-		err = l.onBidAccepted(vLog)
+		err = l.onBidAccepted(vLog) // 接受出价事件
+	case "BidRefunded":
+		err = l.onBidRefunded(vLog) // 未中标出价退款完成事件
 	default:
 		return nil
 	}
@@ -337,11 +339,31 @@ func (l *MarketplaceListener) onBuy(vLog types.Log) error {
 		if err := tx.Where("listing_hash = ?", listingHash).First(&ref).Error; err != nil {
 			return fmt.Errorf("find listing ref failed: %w", err)
 		}
-		return tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
+		var entry model.EntryOrders
+		if err := tx.Where("id = ?", ref.EntryOrderID).First(&entry).Error; err != nil {
+			return fmt.Errorf("find entry order failed: %w", err)
+		}
+		buyerLower := strings.ToLower(buyer)
+		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
 			"status":      enums.Completed,
-			"buyer":       strings.ToLower(buyer),
+			"buyer":       buyerLower,
 			"update_time": now,
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&model.NftList{}).Where("id = ?", entry.NftListID).Updates(map[string]any{
+			"owner":       buyerLower,
+			"update_time": now,
+		}).Error; err != nil {
+			return err
+		}
+		// 直购成交时，该单下仍在进行中的出价均视为未中标，买家可链上 refundLosingBid
+		return tx.Model(&model.BidPlaced{}).
+			Where("orders_id = ? AND status = ?", ref.EntryOrderID, enums.Pending).
+			Updates(map[string]any{
+				"status":      enums.Outbid,
+				"update_time": now,
+			}).Error
 	})
 }
 
@@ -463,6 +485,10 @@ func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
 		if err := tx.Where("listing_hash = ?", listingHash).First(&listingRef).Error; err != nil {
 			return fmt.Errorf("find listing ref failed: %w", err)
 		}
+		var entry model.EntryOrders
+		if err := tx.Where("id = ?", listingRef.EntryOrderID).First(&entry).Error; err != nil {
+			return fmt.Errorf("find entry order failed: %w", err)
+		}
 		// 更新订单状态。
 		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", listingRef.EntryOrderID).Updates(map[string]any{
 			"status":      enums.Completed,
@@ -477,9 +503,54 @@ func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
 		if err := tx.Where("bid_hash = ?", bidHash).First(&bidRef).Error; err != nil {
 			return fmt.Errorf("find bid ref failed: %w", err)
 		}
-		// 更新出价状态。
-		return tx.Model(&model.BidPlaced{}).Where("id = ?", bidRef.BidID).Updates(map[string]any{
+		// 更新中标出价状态。
+		if err := tx.Model(&model.BidPlaced{}).Where("id = ?", bidRef.BidID).Updates(map[string]any{
 			"status":      enums.Completed,
+			"update_time": now,
+		}).Error; err != nil {
+			return err
+		}
+
+		// 同步 NFT 持有者在库中的记录（成交后链上 owner 已为买家）
+		if err := tx.Model(&model.NftList{}).Where("id = ?", entry.NftListID).Updates(map[string]any{
+			"owner":       buyer,
+			"update_time": now,
+		}).Error; err != nil {
+			return err
+		}
+
+		// 其余仍处于「进行中」的出价标记为未中标，买家需调用合约 refundLosingBid 取回托管 BT
+		return tx.Model(&model.BidPlaced{}).
+			Where("orders_id = ? AND id <> ? AND status = ?", listingRef.EntryOrderID, bidRef.BidID, enums.Pending).
+			Updates(map[string]any{
+				"status":      enums.Outbid,
+				"update_time": now,
+			}).Error
+	})
+}
+
+// onBidRefunded 处理未中标出价的链上退款完成事件。
+func (l *MarketplaceListener) onBidRefunded(vLog types.Log) error {
+	if len(vLog.Topics) < 3 {
+		return errors.New("invalid BidRefunded topics")
+	}
+	bidHash := strings.ToLower(vLog.Topics[1].Hex())
+	var data struct {
+		Amount *big.Int
+	}
+	if err := l.abiObj.UnpackIntoInterface(&data, "BidRefunded", vLog.Data); err != nil {
+		return fmt.Errorf("unpack BidRefunded failed: %w", err)
+	}
+	_ = data.Amount
+
+	now := time.Now()
+	return l.db.Transaction(func(tx *gorm.DB) error {
+		var ref model.ChainRefBid
+		if err := tx.Where("bid_hash = ?", bidHash).First(&ref).Error; err != nil {
+			return fmt.Errorf("find bid ref failed: %w", err)
+		}
+		return tx.Model(&model.BidPlaced{}).Where("id = ?", ref.BidID).Updates(map[string]any{
+			"status":      enums.Refunded,
 			"update_time": now,
 		}).Error
 	})

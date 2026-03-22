@@ -22,4 +22,6 @@ type EntryOrdersResponse struct {
 	CreateTime time.Time    `json:"createTime" gorm:"type:datetime; not null"`
 	UpdateTime time.Time    `json:"updateTime" gorm:"type:datetime; not null"`
 	ImageUrl   string       `json:"imageUrl" gorm:"type:varchar(512);not null"` // NFT图片URL
+	// ListingHash 链上 listing 的 EIP-712 hash（上架事件后写入 chain_ref_entry_order；未上链时为空）
+	ListingHash string `json:"listingHash"`
 }

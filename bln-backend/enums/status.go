@@ -9,6 +9,8 @@ const (
 	Expired                 // 已过期
 	Cancelled               // 已取消
 	Invalid                 // 已失效
+	Outbid                  // 未中标（他人成交后，可链上领取托管退款）
+	Refunded                // 托管款已退还（未中标退款完成）
 )
 
 // Desc 返回状态对应的中文描述。
@@ -26,6 +28,10 @@ func (s Status) Desc() string {
 		return "已取消"
 	case Invalid:
 		return "已失效"
+	case Outbid:
+		return "未中标"
+	case Refunded:
+		return "已退款"
 	default:
 		return "未知"
 	}
