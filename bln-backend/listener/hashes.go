@@ -20,7 +20,7 @@ import (
 
 var (
 	// 以下 type hash 与 BloomMarketplace.sol 中 LISTING_TYPEHASH、BID_TYPEHASH 的字符串必须逐字一致。
-	listingTypeHash = crypto.Keccak256Hash([]byte("Listing(address nft,address seller,uint256 tokenId,uint256 price,uint256 deadline,uint256 nonce)"))
+	listingTypeHash = crypto.Keccak256Hash([]byte("Listing(address nft,address seller,uint256 tokenId,uint256 price,uint256 deadline,uint256 nonce,uint256 salt)"))
 	bidTypeHash     = crypto.Keccak256Hash([]byte("Bid(bytes32 listingHash,address buyer,uint256 price,uint256 deadline,uint256 nonce)"))
 	// EIP712Domain 类型定义（EIP-712 标准）；与 OZ EIP712 计算 domainSeparator 时所用一致。
 	domainTypeHash = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
@@ -40,6 +40,7 @@ func calcListingHash(
 	price *big.Int,
 	deadline uint64,
 	nonce uint64,
+	salt *big.Int,
 ) common.Hash {
 	bytes, _ := abi.Arguments{
 		{Type: mustType("bytes32")}, // 类型哈希
@@ -49,6 +50,7 @@ func calcListingHash(
 		{Type: mustType("uint256")}, // 价格
 		{Type: mustType("uint256")}, // 截止时间
 		{Type: mustType("uint256")}, // 非重复值
+		{Type: mustType("uint256")}, // salt
 	}.Pack(
 		listingTypeHash,
 		common.HexToAddress(nftAddr),
@@ -57,6 +59,7 @@ func calcListingHash(
 		price,
 		new(big.Int).SetUint64(deadline),
 		new(big.Int).SetUint64(nonce),
+		salt,
 	)
 
 	// structHash：与合约 keccak256(abi.encode(LISTING_TYPEHASH, listing 各字段)) 相同。

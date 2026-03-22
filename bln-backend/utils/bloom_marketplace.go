@@ -44,6 +44,7 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		"price":       entry.Price,
 		"deadline":    entry.Deadline,
 		"nonce":       entry.Nonce,
+		"salt":        entry.Salt,
 		"nftContract": nftContract.Hex(),
 	}).Info("开始执行 listWithSig 上链流程")
 
@@ -142,6 +143,11 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 	}
 	log.WithField("priceWei", priceWei.String()).Info("价格转换 Wei 成功")
 
+	saltWei, err := parseListingSalt(entry.Salt)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("invalid listing salt: %w", err)
+	}
+
 	listing := struct {
 		Nft      common.Address
 		Seller   common.Address
@@ -149,6 +155,7 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		Price    *big.Int
 		Deadline *big.Int
 		Nonce    *big.Int
+		Salt     *big.Int
 	}{
 		Nft:      nftContract,
 		Seller:   common.HexToAddress(entry.Seller),
@@ -156,6 +163,7 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		Price:    priceWei,
 		Deadline: big.NewInt(entry.Deadline.Unix()),
 		Nonce:    big.NewInt(int64(entry.Nonce)),
+		Salt:     saltWei,
 	}
 	log.WithFields(log.Fields{
 		"listing.nft":      listing.Nft.Hex(),
@@ -164,6 +172,7 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		"listing.priceWei": listing.Price.String(),
 		"listing.deadline": listing.Deadline.String(),
 		"listing.nonce":    listing.Nonce.String(),
+		"listing.salt":     listing.Salt.String(),
 	}).Info("listWithSig 参数组装完成")
 
 	// 第 10 步：发送 listWithSig 交易
@@ -438,9 +447,18 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		return common.Hash{}, fmt.Errorf("parse BloomMarketplace ABI failed: %w", err)
 	}
 
-	listingPriceWei, err := btToWei(entry.Price)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("convert listing price to wei failed: %w", err)
+	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
+	// 验签必须用卖家当初签名的原价；entry_orders.price 在链上降价后会被监听器更新，不能用于 Listing
+	var origOut []interface{}
+	if err := contract.Call(&bind.CallOpts{Context: ctx}, &origOut, "listingOriginalPrice", listingHash); err != nil {
+		return common.Hash{}, fmt.Errorf("read listingOriginalPrice failed: %w", err)
+	}
+	if len(origOut) == 0 {
+		return common.Hash{}, errors.New("listingOriginalPrice returned empty")
+	}
+	listingOrigWei, ok := origOut[0].(*big.Int)
+	if !ok || listingOrigWei == nil || listingOrigWei.Sign() <= 0 {
+		return common.Hash{}, errors.New("listing original price not found on chain")
 	}
 	bidPriceWei, err := btToWei(bid.Price)
 	if err != nil {
@@ -455,6 +473,11 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		return common.Hash{}, fmt.Errorf("decode bid signature failed: %w", err)
 	}
 
+	listingSalt, err := parseListingSalt(entry.Salt)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("invalid listing salt: %w", err)
+	}
+
 	listingParam := struct {
 		Nft      common.Address
 		Seller   common.Address
@@ -462,13 +485,15 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		Price    *big.Int
 		Deadline *big.Int
 		Nonce    *big.Int
+		Salt     *big.Int
 	}{
 		Nft:      nftContract,
 		Seller:   common.HexToAddress(entry.Seller),
 		TokenId:  new(big.Int).SetUint64(uint64(entry.TokenId)),
-		Price:    listingPriceWei,
+		Price:    listingOrigWei,
 		Deadline: big.NewInt(entry.Deadline.Unix()),
 		Nonce:    big.NewInt(int64(entry.Nonce)),
+		Salt:     listingSalt,
 	}
 	bidParam := struct {
 		ListingHash common.Hash
@@ -484,7 +509,6 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		Nonce:       big.NewInt(int64(bid.Nonce)),
 	}
 
-	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
 	tx, err := contract.Transact(auth, "acceptBid", listingParam, listingSigBytes, bidParam, bidSigBytes)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("call acceptBid transact failed: %w", err)
@@ -497,6 +521,23 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		return tx.Hash(), errors.New("acceptBid transaction reverted")
 	}
 	return tx.Hash(), nil
+}
+
+// parseListingSalt 解析挂单 EIP-712 中的 salt（十进制字符串，或 0x 十六进制）。
+func parseListingSalt(s string) (*big.Int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return big.NewInt(0), nil
+	}
+	out := new(big.Int)
+	if _, ok := out.SetString(s, 10); ok {
+		return out, nil
+	}
+	hexStr := strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	if _, ok := out.SetString(hexStr, 16); ok {
+		return out, nil
+	}
+	return nil, errors.New("invalid salt: expected decimal uint256 or hex")
 }
 
 // 把浮点价格字符串转成 18 位最小单位

@@ -25,8 +25,9 @@ import {
   Link,
 } from "@mui/material";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
-import { parseUnits, TypedDataEncoder } from "ethers";
+import { hexlify, parseUnits, randomBytes, TypedDataEncoder } from "ethers";
 import { useWeb3 } from "../web3/provider";
+import { useConfirmDialog } from "../components/ConfirmDialog";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { API_ENDPOINTS } from "../config/api";
 import {
@@ -70,6 +71,8 @@ interface EntryOrderItem {
   updateTime?: string;
   imageUrl?: string;
   listingHash?: string;
+  /** Listing EIP-712 salt（十进制字符串） */
+  salt?: string;
 }
 
 interface BidPlacedItem {
@@ -159,6 +162,7 @@ function entryOrderToNftItem(o: EntryOrderItem, name: string): NftItem {
 
 export function Profile() {
   const { account, isConnected, chainId, signer } = useWeb3();
+  const { requestConfirm, confirmDialog } = useConfirmDialog();
   const [loading, setLoading] = useState(false);
   const [categories, setCategories] = useState<NftCategory[]>([]);
   /** 全部持有的 NFT（所有类目合并） */
@@ -204,6 +208,13 @@ export function Profile() {
 
   const [price, setPrice] = useState("1");
   const [deadlineLocal, setDeadlineLocal] = useState("");
+
+  /** 链上降价（不先取消上架） */
+  const [changePriceDialogOpen, setChangePriceDialogOpen] = useState(false);
+  const [changePriceNft, setChangePriceNft] = useState<NftItem | null>(null);
+  const [changePriceValue, setChangePriceValue] = useState("");
+  const [changePriceError, setChangePriceError] = useState<string | null>(null);
+  const [changePriceSubmitting, setChangePriceSubmitting] = useState(false);
 
   /** 拥有的 NFT — 查看详情弹窗 */
   const [ownedDetailOpen, setOwnedDetailOpen] = useState(false);
@@ -351,7 +362,7 @@ export function Profile() {
 
     const deadlineIso = new Date(deadlineLocal).toISOString();
 
-    // EIP-712 签名：Listing(address nft,address seller,uint256 tokenId,uint256 price,uint256 deadline,uint256 nonce)
+    // EIP-712 签名：Listing(..., uint256 nonce, uint256 salt)
     const nftAddress = getBloomNFTAddress(chainId);
     const marketplaceAddress = getBloomMarketplaceAddress(chainId);
     const deadlineSeconds = Math.floor(new Date(deadlineIso).getTime() / 1000);
@@ -395,6 +406,8 @@ export function Profile() {
       return;
     }
 
+    const saltBig = BigInt(hexlify(randomBytes(32)));
+
     const types: Record<string, Array<{ name: string; type: string }>> = {
       Listing: [
         { name: "nft", type: "address" },
@@ -403,6 +416,7 @@ export function Profile() {
         { name: "price", type: "uint256" },
         { name: "deadline", type: "uint256" },
         { name: "nonce", type: "uint256" },
+        { name: "salt", type: "uint256" },
       ],
     };
 
@@ -420,6 +434,7 @@ export function Profile() {
       price: parseUnits(String(priceNum), 18),
       deadline: BigInt(deadlineSeconds),
       nonce: BigInt(nonceNum),
+      salt: saltBig,
     };
 
     let signature: string;
@@ -439,6 +454,7 @@ export function Profile() {
       price: priceNum,
       deadline: deadlineIso,
       nonce: nonceNum,
+      salt: saltBig.toString(),
       nftListId: Number(selectedNft.id),
       signature,
     };
@@ -499,6 +515,7 @@ export function Profile() {
         price: parseUnits(String(order.price), 18),
         deadline: BigInt(Math.floor(new Date(order.deadline).getTime() / 1000)),
         nonce: BigInt(order.nonce),
+        salt: BigInt(order.salt ?? "0"),
       };
 
       const tx = await marketplace.cancelListing(listing);
@@ -510,6 +527,95 @@ export function Profile() {
       setError(msg || "取消上架失败");
     } finally {
       setCancelSubmittingId(null);
+    }
+  };
+
+  const openChangePriceDialog = (nft: NftItem) => {
+    const ao = activeListingByNftListId[nft.id];
+    setChangePriceNft(nft);
+    setChangePriceValue(ao ? String(ao.price) : "");
+    setChangePriceError(null);
+    setChangePriceDialogOpen(true);
+  };
+
+  const handleSubmitReducePrice = async () => {
+    if (!changePriceNft || !account || !signer || chainId == null) {
+      setChangePriceError("请先连接钱包。");
+      return;
+    }
+    const ao = activeListingByNftListId[changePriceNft.id];
+    if (!ao || ao.status !== 1) {
+      setChangePriceError("未找到进行中的挂单。");
+      return;
+    }
+    if (account.toLowerCase() !== ao.seller.toLowerCase()) {
+      setChangePriceError("仅卖家本人可改价。");
+      return;
+    }
+    const newNum = Number(changePriceValue);
+    const curNum = Number(ao.price);
+    if (!Number.isFinite(newNum) || newNum <= 0) {
+      setChangePriceError("请输入大于 0 的有效价格（BT）。");
+      return;
+    }
+    if (newNum >= curNum) {
+      setChangePriceError(
+        "提价请先在菜单中「取消上架」，再使用「挂单」以更高价重新上架；链上支持仅「降价」无需下架。"
+      );
+      return;
+    }
+    const lhRaw = ao.listingHash?.trim();
+    if (!lhRaw) {
+      setChangePriceError(
+        "暂无 listingHash（请等待上架交易确认并由服务端同步后再试）。"
+      );
+      return;
+    }
+    const listingHash = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
+    const marketplaceAddress = getBloomMarketplaceAddress(chainId);
+    setChangePriceSubmitting(true);
+    setChangePriceError(null);
+    try {
+      const mp = getBloomMarketplaceContract(signer, chainId);
+      const nonceBn = await mp.reductionNonces(account);
+      const newWei = parseUnits(String(newNum), 18);
+      const domain = {
+        name: "BloomMarketplace",
+        version: "1",
+        chainId,
+        verifyingContract: marketplaceAddress,
+      };
+      const types = {
+        PriceReduction: [
+          { name: "listingHash", type: "bytes32" },
+          { name: "seller", type: "address" },
+          { name: "newPrice", type: "uint256" },
+          { name: "nonce", type: "uint256" },
+        ],
+      };
+      const value = {
+        listingHash,
+        seller: account,
+        newPrice: newWei,
+        nonce: nonceBn,
+      };
+      const signature = await signer.signTypedData(domain, types, value);
+      const tx = await mp.reduceListingPrice(
+        listingHash,
+        account,
+        newWei,
+        nonceBn,
+        signature
+      );
+      await tx.wait();
+      setChangePriceDialogOpen(false);
+      setChangePriceNft(null);
+      await refreshPortfolio();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setChangePriceError(msg || "降价失败");
+    } finally {
+      setChangePriceSubmitting(false);
     }
   };
 
@@ -544,6 +650,11 @@ export function Profile() {
 
   const handleAcceptBid = async (bid: BidPlacedItem) => {
     if (!account || !bidDialogNft) return;
+    const ok = await requestConfirm({
+      title: "确认接受出价",
+      description: `确定接受该买家的出价吗？\n\n价格：${bid.price} BT\n买家：${bid.buyer}\n\n接受后将由服务端完成成交，无需在钱包中签名，请确认无误后再操作。`,
+    });
+    if (!ok) return;
     setAcceptBidId(bid.id);
     setBidError(null);
     try {
@@ -972,38 +1083,50 @@ export function Profile() {
                 !!ao &&
                 ao.status === 1 &&
                 ao.seller.toLowerCase() === account.toLowerCase();
-              return (
-                <>
-                  {showViewBids ? (
-                    <MenuItem
-                      onClick={() => {
-                        closeActionMenu();
-                        openBidDialog(n);
-                      }}
-                    >
-                      查看出价
-                    </MenuItem>
-                  ) : null}
+              return [
+                showViewBids ? (
                   <MenuItem
+                    key="view-bids"
                     onClick={() => {
                       closeActionMenu();
-                      void handleCancelListing(n);
+                      openBidDialog(n);
                     }}
-                    disabled={cancelSubmittingId === n.id}
                   >
-                    {cancelSubmittingId === n.id ? "取消中…" : "取消上架"}
+                    查看出价
                   </MenuItem>
-                  <Divider />
+                ) : null,
+                showViewBids ? (
                   <MenuItem
+                    key="change-price"
                     onClick={() => {
                       closeActionMenu();
-                      openEntryOrderDialog(n);
+                      openChangePriceDialog(n);
                     }}
                   >
-                    挂单
+                    修改价格
                   </MenuItem>
-                </>
-              );
+                ) : null,
+                <MenuItem
+                  key="cancel-listing"
+                  onClick={() => {
+                    closeActionMenu();
+                    void handleCancelListing(n);
+                  }}
+                  disabled={cancelSubmittingId === n.id}
+                >
+                  {cancelSubmittingId === n.id ? "取消中…" : "取消上架"}
+                </MenuItem>,
+                <Divider key="after-cancel" />,
+                <MenuItem
+                  key="create-order"
+                  onClick={() => {
+                    closeActionMenu();
+                    openEntryOrderDialog(n);
+                  }}
+                >
+                  挂单
+                </MenuItem>,
+              ];
             })()
           : null}
       </Menu>
@@ -1042,6 +1165,56 @@ export function Profile() {
           </Button>
           <Button variant="contained" onClick={() => void handleSubmitEntryOrder()} disabled={orderSubmitting}>
             {orderSubmitting ? "提交中..." : "确认挂单"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={changePriceDialogOpen}
+        onClose={() => !changePriceSubmitting && setChangePriceDialogOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>修改挂单价</DialogTitle>
+        <DialogContent sx={{ py: 1 }}>
+          <Stack spacing={1.5} sx={{ mt: 1 }}>
+            <Alert severity="info">
+              降价：在下方填写<strong>低于当前价</strong>的新价格，签名并发送链上交易，NFT
+              仍托管在市场合约。提价：请先「取消上架」再「挂单」以更高价重新上架。
+            </Alert>
+            {changePriceError && (
+              <Alert severity="error">{changePriceError}</Alert>
+            )}
+            {changePriceNft ? (
+              <Typography variant="body2" color="text.secondary">
+                {changePriceNft.name}（当前价{" "}
+                {activeListingByNftListId[changePriceNft.id]?.price ?? "-"} BT）
+              </Typography>
+            ) : null}
+            <TextField
+              label="新价格（BT）"
+              type="number"
+              inputProps={{ min: 0, step: "0.0001" }}
+              value={changePriceValue}
+              fullWidth
+              size="small"
+              onChange={(e) => setChangePriceValue(e.target.value)}
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setChangePriceDialogOpen(false)}
+            disabled={changePriceSubmitting}
+          >
+            关闭
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => void handleSubmitReducePrice()}
+            disabled={changePriceSubmitting}
+          >
+            {changePriceSubmitting ? "链上确认中…" : "确认降价"}
           </Button>
         </DialogActions>
       </Dialog>
@@ -1320,6 +1493,7 @@ export function Profile() {
           </Button>
         </DialogActions>
       </Dialog>
+      {confirmDialog}
     </>
   );
 }

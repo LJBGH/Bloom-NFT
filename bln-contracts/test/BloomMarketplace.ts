@@ -47,6 +47,7 @@ describe("BloomMarketplace", () => {
       price: bigint;
       deadline: bigint;
       nonce: bigint;
+      salt: bigint;
     }
   ) {
     const domain = {
@@ -64,6 +65,7 @@ describe("BloomMarketplace", () => {
         { name: "price", type: "uint256" },
         { name: "deadline", type: "uint256" },
         { name: "nonce", type: "uint256" },
+        { name: "salt", type: "uint256" },
       ],
     };
 
@@ -117,6 +119,7 @@ describe("BloomMarketplace", () => {
       price,
       deadline: listingDeadline,
       nonce: 0n,
+      salt: 0n,
     };
 
     // 卖家允许市场合约转移 NFT

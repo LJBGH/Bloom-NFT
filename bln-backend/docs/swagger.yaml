@@ -54,6 +54,9 @@ definitions:
         description: 非重复 nonce（允许 0）
         minimum: 0
         type: integer
+      salt:
+        description: Listing EIP-712 salt（十进制字符串，uint256）
+        type: string
       price:
         description: Price 价格（BT）
         type: number
@@ -70,6 +73,7 @@ definitions:
     - deadline
     - nftListId
     - nonce
+    - salt
     - price
     - seller
     - signature

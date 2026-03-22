@@ -10,5 +10,6 @@ type EntryOrdersRequest struct {
 	Price     float64   `json:"price" binding:"required"`     // 价格（wei 字符串）
 	Deadline  time.Time `json:"deadline" binding:"required"`  // 截止时间
 	Nonce     *int      `json:"nonce" binding:"required,gte=0"` // 非重复 nonce（允许 0）
+	Salt      string    `json:"salt" binding:"required"`        // Listing EIP-712 salt（十进制字符串，uint256）
 	Signature string    `json:"signature" binding:"required"` // EIP-712 signature
 }

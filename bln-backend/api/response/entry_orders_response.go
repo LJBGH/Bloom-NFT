@@ -15,6 +15,7 @@ type EntryOrdersResponse struct {
 	Price      float64      `json:"price" gorm:"type:float;not null"`        // 价格
 	Deadline   time.Time    `json:"deadline" gorm:"type:datetime; not null"` // 截止时间
 	Nonce      int          `json:"nonce" gorm:"type:int;not null"`          // 非重复 nonce
+	Salt       string       `json:"salt" gorm:"type:varchar(80);not null"`   // Listing salt（十进制）
 	Status     enums.Status `json:"status" gorm:"type:int;not null"`         // 状态
 	StatusDesc string       `json:"statusDesc"`                              // 状态说明
 	TxHash     string       `json:"txHash" gorm:"type:varchar(256)"`         // 交易哈希

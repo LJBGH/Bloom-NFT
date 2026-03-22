@@ -35,6 +35,7 @@ func (n *NftOrdersService) EntryOrders(request *request.EntryOrdersRequest) (str
 		Price:      request.Price,
 		Deadline:   request.Deadline,
 		Nonce:      *request.Nonce,
+		Salt:       strings.TrimSpace(request.Salt),
 		Status:     enums.Ready,
 		Signature:  request.Signature,
 		CreateTime: time.Now(),
@@ -174,6 +175,7 @@ func (n *NftOrdersService) BidAccepted(request *request.BidAcceptedRequest) (str
 	return txHash.Hex(), nil
 }
 
+// 获取挂单列表
 func entryOrdersWithImageToResponse(entryOrders []repository.EntryOrdersWithImageUrl) []response.EntryOrdersResponse {
 	resp := make([]response.EntryOrdersResponse, 0, len(entryOrders))
 	for _, m := range entryOrders {
@@ -186,6 +188,7 @@ func entryOrdersWithImageToResponse(entryOrders []repository.EntryOrdersWithImag
 			Price:       m.Price,
 			Deadline:    m.Deadline,
 			Nonce:       m.Nonce,
+			Salt:        m.Salt,
 			Status:      m.Status,
 			StatusDesc:  m.EntryOrders.Status.Desc(),
 			TxHash:      m.TxHash,

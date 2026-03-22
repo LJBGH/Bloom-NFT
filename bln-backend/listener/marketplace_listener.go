@@ -231,6 +231,8 @@ func (l *MarketplaceListener) handleLog(vLog types.Log) error {
 		err = l.onBidAccepted(vLog) // 接受出价事件
 	case "BidRefunded":
 		err = l.onBidRefunded(vLog) // 未中标出价退款完成事件
+	case "ListingPriceReduced":
+		err = l.onListingPriceReduced(vLog, ev) // 卖家链上降价
 	default:
 		return nil
 	}
@@ -253,6 +255,7 @@ func (l *MarketplaceListener) onListed(vLog types.Log, ev *abi.Event) error {
 		Price    *big.Int
 		Deadline *big.Int
 		Nonce    *big.Int
+		Salt     *big.Int
 	}
 
 	// 解析事件数据。
@@ -268,8 +271,8 @@ func (l *MarketplaceListener) onListed(vLog types.Log, ev *abi.Event) error {
 	// 查询订单。
 	var order model.EntryOrders
 	err := l.db.Where(
-		"seller = ? AND token_id = ? AND nonce = ?",
-		strings.ToLower(seller), tokenID, data.Nonce.Int64(),
+		"seller = ? AND token_id = ? AND nonce = ? AND salt = ?",
+		strings.ToLower(seller), tokenID, data.Nonce.Int64(), data.Salt.String(),
 	).Order("id DESC").First(&order).Error
 	if err != nil {
 		return fmt.Errorf("find entry_orders for Listed failed: %w", err)
@@ -298,6 +301,45 @@ func (l *MarketplaceListener) onListed(vLog types.Log, ev *abi.Event) error {
 	}
 
 	return nil
+}
+
+// onListingPriceReduced 处理链上降价事件：同步 entry_orders.price。
+func (l *MarketplaceListener) onListingPriceReduced(vLog types.Log, ev *abi.Event) error {
+	if len(vLog.Topics) < 3 {
+		return errors.New("invalid ListingPriceReduced topics")
+	}
+	listingHash := strings.ToLower(vLog.Topics[1].Hex())
+
+	var data struct {
+		NewPrice *big.Int
+	}
+	if err := l.abiObj.UnpackIntoInterface(&data, ev.Name, vLog.Data); err != nil {
+		return fmt.Errorf("unpack ListingPriceReduced failed: %w", err)
+	}
+	if data.NewPrice == nil {
+		return errors.New("ListingPriceReduced: empty newPrice")
+	}
+
+	now := time.Now()
+	return l.db.Transaction(func(tx *gorm.DB) error {
+		var ref model.ChainRefEntryOrder
+		if err := tx.Where("listing_hash = ?", listingHash).First(&ref).Error; err != nil {
+			return fmt.Errorf("find listing ref failed: %w", err)
+		}
+		priceFloat := weiToBtFloat(data.NewPrice)
+		return tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
+			"price":       priceFloat,
+			"update_time": now,
+		}).Error
+	})
+}
+
+// weiToBtFloat 将 18 位 wei 转为 BT 浮点（与前端 parseUnits 精度对齐）。
+func weiToBtFloat(wei *big.Int) float64 {
+	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	r := new(big.Rat).SetFrac(wei, scale)
+	f, _ := r.Float64()
+	return f
 }
 
 // onListingCancelled 处理取消上架事件。

@@ -22,9 +22,10 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { TypedDataEncoder, parseUnits } from "ethers";
+import { parseUnits } from "ethers";
 import { useEffect, useState } from "react";
 import { API_ENDPOINTS } from "../config/api";
+import { useConfirmDialog } from "../components/ConfirmDialog";
 import { useWeb3 } from "../web3/provider";
 import {
   getBloomMarketplaceAddress,
@@ -42,6 +43,8 @@ interface EntryOrder {
   price: number;
   deadline: string; // backend time.Time (string)
   nonce: number;
+  /** Listing EIP-712 salt（十进制字符串） */
+  salt?: string;
   status: number;
   statusDesc?: string;
   signature: string;
@@ -96,6 +99,7 @@ function formatDateTime(v: string) {
 
 export function Market() {
   const { account, isConnected, chainId, signer } = useWeb3();
+  const { requestConfirm, confirmDialog } = useConfirmDialog();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -164,10 +168,18 @@ export function Market() {
       const marketplaceAddress = getBloomMarketplaceAddress(chainId);
       const tokenContract = getBloomTokenContract(signer, chainId);
       const marketplace = getBloomMarketplaceContract(signer, chainId);
-      const amountWei = parseUnits(String(order.price), 18);
+      const lhRaw = order.listingHash?.trim();
+      if (!lhRaw) {
+        setError("缺少 listingHash（请等待上架同步后再购买）。");
+        return;
+      }
+      const listingHashHex = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
+      // 验签必须用卖家当初签名的原价；实际扣款由合约按 effectiveListingPrice 结算（含链上降价）
+      const origWei: bigint = await marketplace.listingOriginalPrice(listingHashHex);
+      const payWei: bigint = await marketplace.effectiveListingPrice(listingHashHex);
       const allowance: bigint = await tokenContract.allowance(account, marketplaceAddress);
-      if (allowance < amountWei) {
-        const approveTx = await tokenContract.approve(marketplaceAddress, amountWei);
+      if (allowance < payWei) {
+        const approveTx = await tokenContract.approve(marketplaceAddress, payWei);
         await approveTx.wait();
       }
 
@@ -175,9 +187,10 @@ export function Market() {
         nft: getBloomNFTAddress(chainId),
         seller: order.seller,
         tokenId: BigInt(order.tokenId),
-        price: amountWei,
+        price: origWei,
         deadline: BigInt(Math.floor(new Date(order.deadline).getTime() / 1000)),
         nonce: BigInt(order.nonce),
+        salt: BigInt(order.salt || "0"),
       };
 
       const tx = await marketplace.buy(listing, order.signature);
@@ -207,6 +220,11 @@ export function Market() {
       setError("请选择出价截止时间。");
       return;
     }
+    const lhRaw = selectedOrder.listingHash?.trim();
+    if (!lhRaw) {
+      setError("缺少 listingHash（请等待上架同步后再出价，或刷新列表）。");
+      return;
+    }
     try {
       setBidSubmittingId(selectedOrder.id);
       setError(null);
@@ -229,33 +247,9 @@ export function Market() {
       const marketplace = getBloomMarketplaceContract(signer, chainId);
       const onChainNonce = await marketplace.nonces(account);
       const nonceNum = Number(onChainNonce);
-      const listing = {
-        nft: getBloomNFTAddress(chainId),
-        seller: selectedOrder.seller,
-        tokenId: BigInt(selectedOrder.tokenId),
-        price: parseUnits(String(selectedOrder.price), 18),
-        deadline: BigInt(Math.floor(new Date(selectedOrder.deadline).getTime() / 1000)),
-        nonce: BigInt(selectedOrder.nonce),
-      };
-      const listingHash = TypedDataEncoder.hash(
-        {
-          name: "BloomMarketplace",
-          version: "1",
-          chainId,
-          verifyingContract: marketplaceAddress,
-        },
-        {
-          Listing: [
-            { name: "nft", type: "address" },
-            { name: "seller", type: "address" },
-            { name: "tokenId", type: "uint256" },
-            { name: "price", type: "uint256" },
-            { name: "deadline", type: "uint256" },
-            { name: "nonce", type: "uint256" },
-          ],
-        },
-        listing
-      );
+      // Bid.listingHash 必须与链上一致：不能用「当前 order.price」重算 Listing，否则降价后
+      // 会得到错误 hash，与后端上链时使用的 listingHash 不一致 → bad bid sig
+      const listingHash = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
       const signature = await signer.signTypedData(
         {
           name: "BloomMarketplace",
@@ -309,6 +303,11 @@ export function Market() {
   };
 
   const handleRefundLosingBid = async (bid: BidItem) => {
+    const ok = await requestConfirm({
+      title: "确认领取托管退款",
+      description: `确定领取该笔托管退款吗？\n\n金额约：${bid.price} BT\n\n确认后将发起链上交易；若使用浏览器钱包，随后还会在钱包中确认。`,
+    });
+    if (!ok) return;
     if (!detailOrder || !signer || chainId == null || !account) {
       setError("请先连接钱包。");
       return;
@@ -582,6 +581,7 @@ export function Market() {
           </Button>
         </DialogActions>
       </Dialog>
+      {confirmDialog}
     </Box>
   );
 }

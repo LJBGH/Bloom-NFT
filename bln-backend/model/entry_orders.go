@@ -14,6 +14,7 @@ type EntryOrders struct {
 	Price      float64      `json:"price" gorm:"type:float;not null"`            // 价格
 	Deadline   time.Time    `json:"deadline" gorm:"type:datetime; not null"`     // 截止时间
 	Nonce      int          `json:"nonce" gorm:"type:int;not null"`              // 非重复 nonce
+	Salt       string       `json:"salt" gorm:"type:varchar(80);not null;default:'0'"` // Listing EIP-712 salt（十进制字符串）
 	Status     enums.Status `json:"status" gorm:"type:int;not null"`             // 状态
 	Signature  string       `json:"signature" gorm:"type:varchar(256);not null"` // EIP-712 signature
 	TxHash     string       `json:"txHash" gorm:"type:varchar(256)"`             // 交易哈希

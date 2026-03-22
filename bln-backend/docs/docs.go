@@ -963,6 +963,7 @@ const docTemplate = `{
                 "deadline",
                 "nftListId",
                 "nonce",
+                "salt",
                 "price",
                 "seller",
                 "signature",
@@ -981,6 +982,10 @@ const docTemplate = `{
                     "description": "非重复 nonce（允许 0）",
                     "type": "integer",
                     "minimum": 0
+                },
+                "salt": {
+                    "description": "Listing EIP-712 salt（十进制字符串，uint256）",
+                    "type": "string"
                 },
                 "price": {
                     "description": "Price 价格（BT）",
