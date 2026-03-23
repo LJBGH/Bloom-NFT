@@ -48,6 +48,13 @@ func main() {
 		}
 	}()
 
+	// 启动链下过期扫描：更新挂单/出价到期状态（不与合约交互）
+	go func() {
+		if err := listener.StartMarketplaceExpirationWorker(context.Background()); err != nil {
+			log.Printf("start marketplace expiration worker failed: %v", err)
+		}
+	}()
+
 	addr := fmt.Sprintf(":%s", config.AppConfig.Port)
 	log.Printf("swagger is running on http://localhost%s/swagger/index.html", addr)
 	r.Run(addr)

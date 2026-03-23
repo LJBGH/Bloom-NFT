@@ -151,6 +151,7 @@ func (n *NftOrdersService) EntryOrdersBatch(req *request.BatchEntryOrdersRequest
 			proof[j] = common.HexToHash(p)
 		}
 
+		// 批量上架
 		h, err := utils.ListWithMerkleProofOnChain(entry, nftAddr, proof, root, rootDeadline, req.BatchSignature)
 		if err != nil {
 			_ = n.markBatchEntriesCancelled(ids)
@@ -162,6 +163,7 @@ func (n *NftOrdersService) EntryOrdersBatch(req *request.BatchEntryOrdersRequest
 	return txHashes, nil
 }
 
+// 批量取消上架
 func (n *NftOrdersService) markBatchEntriesCancelled(ids []uint) error {
 	if len(ids) == 0 {
 		return nil

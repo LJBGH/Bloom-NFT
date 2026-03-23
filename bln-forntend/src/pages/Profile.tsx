@@ -114,7 +114,9 @@ const ORDER_STATUS_LABELS: Record<number, string> = {
   4: "已取消",
 };
 
-/** 仅保留「当前钱包 + 进行中(1)」的挂单；同一 nftListId 取 id 最大的一条 */
+/** 仅保留「当前钱包 + 进行中(1) / 已过期(3)」的挂单；
+ * 同一 nftListId 取 id 最大的一条
+ */
 function buildActiveListingMap(
   orders: EntryOrderItem[],
   wallet: string
@@ -123,7 +125,7 @@ function buildActiveListingMap(
   const map: Record<number, EntryOrderItem> = {};
   for (const o of orders) {
     if (o.seller.toLowerCase() !== w) continue;
-    if (o.status !== 1) continue;
+    if (o.status !== 1 && o.status !== 3) continue;
     const prev = map[o.nftListId];
     if (!prev || o.id > prev.id) {
       map[o.nftListId] = o;
@@ -233,6 +235,12 @@ export function Profile() {
   const [batchListOpen, setBatchListOpen] = useState(false);
   const [batchListPrice, setBatchListPrice] = useState("1");
   const [batchListDeadline, setBatchListDeadline] = useState("");
+  const [batchListPricesById, setBatchListPricesById] = useState<
+    Record<number, string>
+  >({});
+  const [batchListDeadlinesById, setBatchListDeadlinesById] = useState<
+    Record<number, string>
+  >({});
   const [batchListPicks, setBatchListPicks] = useState<Set<number>>(() => new Set());
   const [batchListSubmitting, setBatchListSubmitting] = useState(false);
   /** 批量下架：勾选订单 id */
@@ -248,9 +256,16 @@ export function Profile() {
   const pad2 = (n: number) => String(n).padStart(2, "0");
   const toDateTimeLocal = (d: Date) => {
     // datetime-local expects local time: YYYY-MM-DDTHH:mm
+    // We only keep hour precision, so we force minutes to ":00".
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(
       d.getHours()
-    )}:${pad2(d.getMinutes())}`;
+    )}:00`;
+  };
+  const normalizeHourOnlyDateTimeLocal = (value: string) => {
+    // Expected: YYYY-MM-DDTHH:mm (we normalize it to YYYY-MM-DDTHH:00)
+    const m = value.match(/^(\d{4}-\d{2}-\d{2})T(\d{2})/);
+    if (!m) return value;
+    return `${m[1]}T${m[2]}:00`;
   };
   const defaultDeadline = () => {
     const d = new Date();
@@ -423,17 +438,38 @@ export function Profile() {
     setBatchListDeadline(defaultDeadline());
     setBatchListPrice("1");
     setBatchListPicks(new Set());
+    setBatchListPricesById({});
+    setBatchListDeadlinesById({});
     setBatchListOpen(true);
     setOrderError(null);
   };
 
   const toggleBatchListPick = (nftListId: number) => {
+    const wasPicked = batchListPicks.has(nftListId);
     setBatchListPicks((prev) => {
       const n = new Set(prev);
       if (n.has(nftListId)) n.delete(nftListId);
       else n.add(nftListId);
       return n;
     });
+    if (wasPicked) {
+      setBatchListPricesById((prev) => {
+        const next = { ...prev };
+        delete next[nftListId];
+        return next;
+      });
+      setBatchListDeadlinesById((prev) => {
+        const next = { ...prev };
+        delete next[nftListId];
+        return next;
+      });
+    } else {
+      setBatchListPricesById((prev) => ({ ...prev, [nftListId]: batchListPrice }));
+      setBatchListDeadlinesById((prev) => ({
+        ...prev,
+        [nftListId]: batchListDeadline,
+      }));
+    }
   };
 
   const handleSubmitBatchMerkleList = async () => {
@@ -446,20 +482,8 @@ export function Profile() {
       setOrderError("请至少选择一件未挂单的 NFT。");
       return;
     }
-    const priceNum = Number(batchListPrice);
-    if (!Number.isFinite(priceNum) || priceNum <= 0) {
-      setOrderError("请输入有效的批量价格（BT）。");
-      return;
-    }
-    if (!batchListDeadline) {
-      setOrderError("请选择截止时间。");
-      return;
-    }
-    const deadlineIso = new Date(batchListDeadline).toISOString();
-    const deadlineSec = BigInt(Math.floor(new Date(deadlineIso).getTime() / 1000));
     const nftAddress = getBloomNFTAddress(chainId);
     const marketplaceAddress = getBloomMarketplaceAddress(chainId);
-    const priceWei = parseUnits(String(priceNum), 18);
 
     setBatchListSubmitting(true);
     setOrderError(null);
@@ -482,8 +506,35 @@ export function Profile() {
 
       const salts: bigint[] = [];
       const leaves: string[] = [];
+      const pricesNum: number[] = [];
+      const deadlinesIso: string[] = [];
+      let rootDeadlineSec = 0n;
+
       for (const nft of picked) {
+        const priceStr = batchListPricesById[nft.id] ?? batchListPrice;
+        const priceNum = Number(priceStr);
+        if (!Number.isFinite(priceNum) || priceNum <= 0) {
+          throw new Error(
+            `无效价格（BT）：${priceStr}，NFT：${nft.name} Token#${nft.tokenId}`
+          );
+        }
+
+        const deadlineStr =
+          batchListDeadlinesById[nft.id] ?? batchListDeadline;
+        if (!deadlineStr) {
+          throw new Error(
+            `请选择截止时间，NFT：${nft.name} Token#${nft.tokenId}`
+          );
+        }
+
+        const deadlineIso = new Date(deadlineStr).toISOString();
+        const deadlineSec = BigInt(
+          Math.floor(new Date(deadlineIso).getTime() / 1000)
+        );
+
+        const priceWei = parseUnits(String(priceNum), 18);
         const salt = randomSalt();
+
         salts.push(salt);
         leaves.push(
           listingLeafHash(
@@ -495,9 +546,18 @@ export function Profile() {
             salt
           )
         );
+        pricesNum.push(priceNum);
+        deadlinesIso.push(deadlineIso);
+        if (deadlineSec > rootDeadlineSec) rootDeadlineSec = deadlineSec;
       }
+
+      if (rootDeadlineSec === 0n) {
+        throw new Error("批量上架的 rootDeadlineSec 计算失败");
+      }
+
       const { root, layers } = buildMerkleTreeFromLeaves(leaves);
-      const rootDeadlineSec = deadlineSec;
+      const rootDeadlineMs = Number(rootDeadlineSec) * 1000;
+      const rootDeadlineIso = new Date(rootDeadlineMs).toISOString();
 
       const batchSig = await signer.signTypedData(
         {
@@ -526,8 +586,8 @@ export function Profile() {
           nftListId: nft.id,
           seller: account,
           tokenId: nft.tokenId,
-          price: priceNum,
-          deadline: deadlineIso,
+          price: pricesNum[idx],
+          deadline: deadlinesIso[idx],
           salt: salts[idx].toString(),
           proof,
         };
@@ -537,7 +597,7 @@ export function Profile() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          rootDeadline: deadlineIso,
+          rootDeadline: rootDeadlineIso,
           merkleRoot: root,
           batchSignature: batchSig,
           items,
@@ -573,7 +633,8 @@ export function Profile() {
       return;
     }
     const orders = listedOrders.filter(
-      (o) => cancelBatchPicks.has(o.id) && o.status === 1
+      (o) =>
+        cancelBatchPicks.has(o.id) && (o.status === 1 || o.status === 3)
     );
     if (orders.length === 0) {
       setError("请勾选至少一笔进行中的挂单。");
@@ -756,7 +817,7 @@ export function Profile() {
       setError("未找到对应挂单信息，无法取消上架。");
       return;
     }
-    if (order.status !== 1) {
+    if (order.status !== 1 && order.status !== 3) {
       setError("当前状态不可取消上架。");
       return;
     }
@@ -1200,7 +1261,7 @@ export function Profile() {
                                 <Checkbox
                                   size="small"
                                   checked={cancelBatchPicks.has(order.id)}
-                                  disabled={order.status !== 1}
+                                    disabled={order.status !== 1 && order.status !== 3}
                                   onChange={() => toggleCancelBatchPick(order.id)}
                                 />
                               </TableCell>
@@ -1432,7 +1493,15 @@ export function Profile() {
           : null}
       </Menu>
 
-      <Dialog open={orderDialogOpen} onClose={() => setOrderDialogOpen(false)} maxWidth="xs" fullWidth>
+      <Dialog
+        open={orderDialogOpen}
+        onClose={() => {
+          if (orderSubmitting) return;
+          setOrderDialogOpen(false);
+        }}
+        maxWidth="xs"
+        fullWidth
+      >
         <DialogTitle>填写挂单信息</DialogTitle>
         <DialogContent sx={{ py: 1 }}>
           <Stack spacing={1.5} sx={{ mt: 1 }}>
@@ -1455,8 +1524,13 @@ export function Profile() {
               value={deadlineLocal}
               fullWidth
               InputLabelProps={{ shrink: true }}
+              onChange={(e) => {
+                setDeadlineLocal(
+                  normalizeHourOnlyDateTimeLocal(e.target.value)
+                );
+              }}
+              inputProps={{ step: "3600" }}
               size="small"
-              onChange={(e) => setDeadlineLocal(e.target.value)}
             />
           </Stack>
         </DialogContent>
@@ -1472,7 +1546,13 @@ export function Profile() {
 
       <Dialog
         open={batchListOpen}
-        onClose={() => !batchListSubmitting && setBatchListOpen(false)}
+        onClose={(_, reason) => {
+          if (batchListSubmitting) return;
+          // datetime-local 的交互可能触发 backdrop/escape 关闭；这里忽略这些关闭原因，
+          // 避免用户选完时间后对话框被意外关闭。
+          if (reason === "backdropClick" || reason === "escapeKeyDown") return;
+          setBatchListOpen(false);
+        }}
         maxWidth="sm"
         fullWidth
       >
@@ -1480,13 +1560,13 @@ export function Profile() {
         <DialogContent sx={{ py: 1 }}>
           <Stack spacing={1.5} sx={{ mt: 1 }}>
             <Alert severity="info">
-              勾选未挂单的 NFT，填写统一价格与截止时间；将签名一次 Merkle 根并由服务端逐笔
-              listWithMerkleProof 上链。Listing.nonce 为 0，请勿与单笔挂单混淆。
+              勾选未挂单的 NFT 后，可为每个 NFT 单独填写价格与截止时间；将签名一次 Merkle
+              根并由服务端逐笔 listWithMerkleProof 上链。Listing.nonce 为 0，请勿与单笔挂单混淆。
             </Alert>
             {orderError && <Alert severity="error">{orderError}</Alert>}
             {orderSuccess && <Alert severity="success">{orderSuccess}</Alert>}
             <TextField
-              label="统一价格（BT）"
+              label="默认价格（BT）"
               type="number"
               inputProps={{ min: 0, step: "0.0001" }}
               value={batchListPrice}
@@ -1495,36 +1575,93 @@ export function Profile() {
               onChange={(e) => setBatchListPrice(e.target.value)}
             />
             <TextField
-              label="截止时间"
+              label="默认截止时间"
               type="datetime-local"
               value={batchListDeadline}
               fullWidth
               InputLabelProps={{ shrink: true }}
               size="small"
-              onChange={(e) => setBatchListDeadline(e.target.value)}
+              onChange={(e) => {
+                setBatchListDeadline(
+                  normalizeHourOnlyDateTimeLocal(e.target.value)
+                );
+              }}
+              inputProps={{ step: "3600" }}
             />
             <Typography variant="subtitle2">选择 NFT（未挂单）</Typography>
             <Stack spacing={0.5} sx={{ maxHeight: 240, overflow: "auto" }}>
               {unlistedForBatch.length === 0 ? (
                 <Typography color="text.secondary">暂无可批量上架的 NFT</Typography>
               ) : (
-                unlistedForBatch.map((nft) => (
-                  <Stack
-                    key={`${nft.categoryId}-${nft.id}`}
-                    direction="row"
-                    alignItems="center"
-                    spacing={1}
-                  >
-                    <Checkbox
-                      size="small"
-                      checked={batchListPicks.has(nft.id)}
-                      onChange={() => toggleBatchListPick(nft.id)}
-                    />
-                    <Typography variant="body2">
-                      {nft.name} · Token #{nft.tokenId}
-                    </Typography>
-                  </Stack>
-                ))
+                unlistedForBatch.map((nft) => {
+                  const picked = batchListPicks.has(nft.id);
+                  const priceValue = batchListPricesById[nft.id] ?? batchListPrice;
+                  const deadlineValue =
+                    batchListDeadlinesById[nft.id] ?? batchListDeadline;
+                  return (
+                    <Stack
+                      key={`${nft.categoryId}-${nft.id}`}
+                      spacing={0.5}
+                      sx={{ py: 0.5 }}
+                    >
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={1}
+                      >
+                        <Checkbox
+                          size="small"
+                          checked={picked}
+                          onChange={() => toggleBatchListPick(nft.id)}
+                        />
+                        <Typography variant="body2">
+                          {nft.name} · Token #{nft.tokenId}
+                        </Typography>
+                      </Stack>
+
+                      {picked ? (
+                        <Stack
+                          direction="row"
+                          spacing={1}
+                          alignItems="center"
+                          sx={{ pl: 4, pr: 1, width: "100%" }}
+                        >
+                          <TextField
+                            label="价格（BT）"
+                            type="number"
+                            inputProps={{ min: 0, step: "0.0001" }}
+                            value={priceValue}
+                            size="small"
+                            sx={{ width: 140 }}
+                            onChange={(e) =>
+                              setBatchListPricesById((prev) => ({
+                                ...prev,
+                                [nft.id]: e.target.value,
+                              }))
+                            }
+                          />
+                          <TextField
+                            label="截止时间"
+                            type="datetime-local"
+                            value={deadlineValue}
+                            InputLabelProps={{ shrink: true }}
+                            size="small"
+                            sx={{ flex: 1, minWidth: 220 }}
+                            onChange={(e) =>
+                              setBatchListDeadlinesById((prev) => ({
+                                ...prev,
+                                [nft.id]: normalizeHourOnlyDateTimeLocal(
+                                  e.target.value
+                                ),
+                              }))
+                            }
+                            inputProps={{ step: "3600" }}
+                          />
+                        </Stack>
+                      ) : null}
+                    </Stack>
+                  );
+                })
               )}
             </Stack>
           </Stack>

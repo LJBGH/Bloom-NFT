@@ -29,21 +29,21 @@ type Config struct {
 		Algorithm  string `mapstructure:"ALGORITHM"`
 	} `mapstructure:"JWT"`
 	IpfsPinana struct {
-		UploadUrl string `mapstructure:"UPLOAD_URL"`
-		ViewUrl   string `mapstructure:"VIEW_URL"`
-		ApiKey    string `mapstructure:"API_KEY"`
-		ApiSecret string `mapstructure:"API_SECRET"`
-		Jwt       string `mapstructure:"JWT"`
+		UploadUrl string `mapstructure:"UPLOAD_URL"` // 上传URL
+		ViewUrl   string `mapstructure:"VIEW_URL"`   // 查看URL
+		ApiKey    string `mapstructure:"API_KEY"`    // API密钥
+		ApiSecret string `mapstructure:"API_SECRET"` // API密钥
+		Jwt       string `mapstructure:"JWT"`        // JWT
 	} `mapstructure:"IPFS_PINATA"`
 	NetWork struct {
-		RpcUrl            string `mapstructure:"RPC_URL"`
-		AccountPrivateKey string `mapstructure:"ACCOUNT_PRIVATEKEY"`
+		RpcUrl            string `mapstructure:"RPC_URL"`            // 网络RPC地址
+		AccountPrivateKey string `mapstructure:"ACCOUNT_PRIVATEKEY"` // 账户私钥
 	} `mapstructure:"NETWORK"`
 	Listener struct {
-		Enabled         bool   `mapstructure:"ENABLED"`
-		StartBlock      uint64 `mapstructure:"START_BLOCK"`
-		PollIntervalSec int    `mapstructure:"POLL_INTERVAL_SEC"`
-		BatchSize       uint64 `mapstructure:"BATCH_SIZE"`
+		Enabled         bool   `mapstructure:"ENABLED"`           // 是否启用
+		StartBlock      uint64 `mapstructure:"START_BLOCK"`       // 开始区块
+		PollIntervalSec int    `mapstructure:"POLL_INTERVAL_SEC"` // 轮询间隔，单位：秒
+		BatchSize       uint64 `mapstructure:"BATCH_SIZE"`        // 批量大小
 	} `mapstructure:"LISTENER"`
 }
 

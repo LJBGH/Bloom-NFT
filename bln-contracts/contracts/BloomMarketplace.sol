@@ -288,15 +288,23 @@ contract BloomMarketplace is Ownable, EIP712 {
         require(listing.seller != buyer, "seller=buyer");
         require(listing.price > 0, "price=0");
 
+        // 验证上架
         bytes32 listingHash = _verifyListingForPurchase(listing, signature);
+        // 检查 listing 是否存在
         require(listings[listingHash], "not listing");
+        // 检查 listing 是否已售出
         require(!sold[listingHash], "already sold");
 
+        // 计算支付价格
         uint256 payPrice = _effectivePrice(listingHash);
+        // 计算手续费
         uint256 fee = payPrice * feeRate / feePrecision;
+        // 转账手续费
         require(token.transferFrom(buyer, address(this), fee), "pay fee failed");
+        // 转账价格
         require(token.transferFrom(buyer, listing.seller, payPrice - fee), "pay price failed");
 
+        // 转账 NFT
         IERC721(listing.nft).safeTransferFrom(address(this), buyer, listing.tokenId);
 
         sold[listingHash] = true;
@@ -437,6 +445,7 @@ contract BloomMarketplace is Ownable, EIP712 {
         return _effectivePrice(listingHash_);
     }
 
+    // 计算有效挂单价
     function _effectivePrice(bytes32 listingHash_) internal view returns (uint256) {
         uint256 orig = listingOriginalPrice[listingHash_];
         require(orig > 0, "unknown listing");
