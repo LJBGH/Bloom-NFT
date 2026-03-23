@@ -32,7 +32,8 @@ Bloom-NFT 是一个基于以太坊区块链的 NFT 市场项目，包含合约�
 ### 2、后端
 
 - 前置条件：先复制部署后的合约地址与ABI配置文件到目录 `/bin-backend/abi`
-
+- 启动后端工程
+  
   ```bash
   cd bln-backend
   go run main.go
@@ -44,7 +45,6 @@ Bloom-NFT 是一个基于以太坊区块链的 NFT 市场项目，包含合约�
 ### 3、前端
 
 - 前置条件：先复制部署后的合约地址与ABI配置文件到目录 `/bln-forntend/src/config`
-- 进入`bln-forntend`目录
 - 启动前端工程
 
   ```bash

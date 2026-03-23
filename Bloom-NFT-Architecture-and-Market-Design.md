@@ -331,7 +331,8 @@ Merkle 路径的特殊规则：
 3. `bln-backend/services/nft_orders_service.go`：业务编排层（创建挂单/出价、接受出价、状态校验）。
 4. `bln-backend/repository/nft_orders_repository.go`：数据库访问（GORM 查询与插入）。
 5. `bln-backend/listener/marketplace_listener.go`：合约事件监听与落库更新状态。
-6. `bln-backend/utils/bloom_marketplace.go`：链上调用封装（发送交易、签名参数组装、Merkle 空签名处理等）。
+6. `bln-backend/listener/marketplace_expiration_worker.go`：定时扫描数据库 deadline，把 `Pending -> Expired`（不与合约交互，仅更新 DB 状态）。
+7. `bln-backend/utils/bloom_marketplace.go`：链上调用封装（发送交易、签名参数组装、Merkle 空签名处理等）。
 
 ### 3.2 REST API（与市场功能直接相关的端点）
 
@@ -415,6 +416,10 @@ Merkle 路径的特殊规则：
    - `entry_orders.status -> ListingCancelled`
    - 并将该单下 pending bids 置为 `BidDelisted`（提示前端：这些 bids 取回路径不再依赖 acceptBid，中间态会走撤回/退款策略）。
 
+8. `marketplace_expiration_worker`（链下）：
+   - `entry_orders.status=ListingPending && deadline<=now`：置为 `ListingExpired`
+   - `bid_placed.status=BidPending && (bid.deadline<=now || entry.deadline<=now)`：置为 `BidExpired`
+
 ---
 
 ## 4. 前端 React 交互与签名/状态细节
@@ -478,7 +483,7 @@ ListingStatus（`entry_orders.status`）：
 1. `0` 准备中（未上链）
 2. `1` 进行中（已上链 Listed，且未 sold）
 3. `2` 已成交（Buy 或 BidAccepted）
-4. `3` 已过期（deadline 到期的前端/后端可选逻辑）
+4. `3` 已过期（deadline 到期后由后端过期扫描 worker 自动推进为 Expired；合约托管资产仍需由卖家/买家发起取回交易）
 5. `4` 已取消（卖家取消/上链失败等）
 
 BidStatus（`bid_placed.status`）：
@@ -486,7 +491,7 @@ BidStatus（`bid_placed.status`）：
 1. `0` 准备中（入库未上链）
 2. `1` 进行中（BidPlaced 事件确认后）
 3. `2` 已成交（BidAccepted 中标）
-4. `3` 已过期（deadline 到期的前端/后端可选逻辑）
+4. `3` 已过期（deadline 到期后由后端过期扫描 worker 自动推进为 Expired）
 5. `4` 取消出价（cancelBid / 上链失败等）
 6. `5` 已下架（挂单被取消后，该出价的“进行中”语义被置为 delisted）
 7. `6` 未中标（直购/接受其它 bid 后，该笔变为 outbid，之后可退款）
@@ -524,6 +529,5 @@ BidStatus（`bid_placed.status`）：
 
 如果需要继续增强产品体验与一致性，可以考虑：
 
-1. 在后端增加 deadline 到期后的状态推进（如将过期挂单/出价转为 Expired）。
-2. 将链上交易提交后的 DB optimistic 标记改为“只写链上事件”，进一步简化一致性边界。
-3. 为 batch buy / batch cancel 增加更细粒度的前端校验与拆分重试策略。
+1. 将链上交易提交后的 DB optimistic 标记改为“只写链上事件”，进一步简化一致性边界。
+2. 为 batch buy / batch cancel 增加更细粒度的前端校验与拆分重试策略。
