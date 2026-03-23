@@ -23,9 +23,16 @@ import {
   Tabs,
   Tab,
   Link,
+  Checkbox,
 } from "@mui/material";
 import KeyboardArrowDownIcon from "@mui/icons-material/KeyboardArrowDown";
 import { hexlify, parseUnits, randomBytes, TypedDataEncoder } from "ethers";
+import {
+  buildMerkleTreeFromLeaves,
+  getMerkleProof,
+  listingLeafHash,
+  randomSalt,
+} from "../utils/merkle";
 import { useWeb3 } from "../web3/provider";
 import { useConfirmDialog } from "../components/ConfirmDialog";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -63,7 +70,6 @@ interface EntryOrderItem {
   tokenId: number;
   price: number;
   deadline: string;
-  nonce: number;
   status: number;
   statusDesc?: string;
   txHash?: string;
@@ -73,6 +79,7 @@ interface EntryOrderItem {
   listingHash?: string;
   /** Listing EIP-712 salt（十进制字符串） */
   salt?: string;
+  isMerkle?: boolean;
 }
 
 interface BidPlacedItem {
@@ -81,7 +88,7 @@ interface BidPlacedItem {
   buyer: string;
   price: number;
   deadline: string;
-  nonce: number;
+  salt: string;
   status: number;
   txHash?: string;
   createTime?: string;
@@ -92,20 +99,19 @@ const BID_STATUS_LABELS: Record<number, string> = {
   1: "进行中",
   2: "已成交",
   3: "已过期",
-  4: "已取消",
-  5: "已失效",
+  4: "取消出价",
+  5: "已下架",
   6: "未中标",
   7: "已退款",
 };
 
-/** 挂单 entry_orders 状态（与后端 enums.Status 一致；6/7 为出价侧状态，挂单一般不会写入） */
+/** 挂单 entry_orders.status（ListingStatus 0–4） */
 const ORDER_STATUS_LABELS: Record<number, string> = {
   0: "准备中",
   1: "进行中",
   2: "已成交",
   3: "已过期",
   4: "已取消",
-  5: "已失效",
 };
 
 /** 仅保留「当前钱包 + 进行中(1)」的挂单；同一 nftListId 取 id 最大的一条 */
@@ -132,7 +138,7 @@ interface MyBidHistoryRow {
   buyer: string;
   price: number;
   deadline: string;
-  nonce: number;
+  salt: string;
   status: number;
   statusDesc?: string;
   nftListId: number;
@@ -140,6 +146,10 @@ interface MyBidHistoryRow {
   entrySeller: string;
   imageUrl?: string;
   createTime?: string;
+  listingHash?: string;
+  /** 对应 entry_orders.status（挂单是否已取消等） */
+  entryOrderStatus?: number;
+  signature?: string;
 }
 
 /** 持有的 NFT + 所属类目（前端聚合多类目接口） */
@@ -179,6 +189,9 @@ export function Profile() {
   const [historyOrdersLoading, setHistoryOrdersLoading] = useState(false);
   const [historyBidsLoading, setHistoryBidsLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [reclaimHistoryBidId, setReclaimHistoryBidId] = useState<number | null>(
+    null
+  );
 
   /** NFT 卡片「操作」下拉菜单（进行中挂单时） */
   const [actionMenu, setActionMenu] = useState<{
@@ -215,6 +228,16 @@ export function Profile() {
   const [changePriceValue, setChangePriceValue] = useState("");
   const [changePriceError, setChangePriceError] = useState<string | null>(null);
   const [changePriceSubmitting, setChangePriceSubmitting] = useState(false);
+
+  /** Merkle 批量上架对话框 */
+  const [batchListOpen, setBatchListOpen] = useState(false);
+  const [batchListPrice, setBatchListPrice] = useState("1");
+  const [batchListDeadline, setBatchListDeadline] = useState("");
+  const [batchListPicks, setBatchListPicks] = useState<Set<number>>(() => new Set());
+  const [batchListSubmitting, setBatchListSubmitting] = useState(false);
+  /** 批量下架：勾选订单 id */
+  const [cancelBatchPicks, setCancelBatchPicks] = useState<Set<number>>(() => new Set());
+  const [cancelBatchSubmitting, setCancelBatchSubmitting] = useState(false);
 
   /** 拥有的 NFT — 查看详情弹窗 */
   const [ownedDetailOpen, setOwnedDetailOpen] = useState(false);
@@ -275,6 +298,57 @@ export function Profile() {
     }
   };
 
+  const handleReclaimBidFromHistory = async (row: MyBidHistoryRow) => {
+    if (!account || !signer || chainId == null) {
+      setHistoryError("请先连接钱包。");
+      return;
+    }
+    const lhRaw = row.listingHash?.trim();
+    if (!lhRaw) {
+      setHistoryError("缺少 listingHash，请等待同步后重试。");
+      return;
+    }
+    const ok = await requestConfirm({
+      title: "确认取回托管 BT",
+      description: `约 ${row.price} BT。未成交挂单将走「撤回出价」；已成交未中标将走「未中标退款」。`,
+    });
+    if (!ok) return;
+    setReclaimHistoryBidId(row.id);
+    setHistoryError(null);
+    try {
+      const mp = getBloomMarketplaceContract(signer, chainId);
+      const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
+      const bidStruct = {
+        listingHash: lh,
+        buyer: row.buyer,
+        price: parseUnits(String(row.price), 18),
+        deadline: BigInt(Math.floor(new Date(row.deadline).getTime() / 1000)),
+        salt: BigInt(row.salt),
+      };
+      const sold: boolean = await mp.sold(lh);
+      let tx;
+      if (!sold) {
+        tx = await mp.cancelBid(bidStruct);
+      } else {
+        if (!row.signature) {
+          setHistoryError("缺少出价签名，无法领取未中标退款。");
+          return;
+        }
+        const sig = row.signature.startsWith("0x")
+          ? row.signature
+          : `0x${row.signature}`;
+        tx = await mp.refundLosingBid(bidStruct, sig);
+      }
+      await tx.wait();
+      await fetchHistoryBids();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setHistoryError(msg || "取回托管失败");
+    } finally {
+      setReclaimHistoryBidId(null);
+    }
+  };
+
   /** 拉取全量挂单 + 所有类目下的持有 NFT（沿用现有接口，无需改后端） */
   const refreshPortfolio = useCallback(async () => {
     if (!account || categories.length === 0) return;
@@ -330,6 +404,12 @@ export function Profile() {
     return m;
   }, [allOwnedNfts]);
 
+  /** 未挂单、可用于 Merkle 批量上架的持有项 */
+  const unlistedForBatch = useMemo(
+    () => allOwnedNfts.filter((n) => !activeListingByNftListId[n.id]),
+    [allOwnedNfts, activeListingByNftListId]
+  );
+
   const openEntryOrderDialog = (nft: NftItem) => {
     setSelectedNft(nft);
     setPrice("1");
@@ -337,6 +417,205 @@ export function Profile() {
     setOrderError(null);
     setOrderSuccess(null);
     setOrderDialogOpen(true);
+  };
+
+  const openBatchListDialog = () => {
+    setBatchListDeadline(defaultDeadline());
+    setBatchListPrice("1");
+    setBatchListPicks(new Set());
+    setBatchListOpen(true);
+    setOrderError(null);
+  };
+
+  const toggleBatchListPick = (nftListId: number) => {
+    setBatchListPicks((prev) => {
+      const n = new Set(prev);
+      if (n.has(nftListId)) n.delete(nftListId);
+      else n.add(nftListId);
+      return n;
+    });
+  };
+
+  const handleSubmitBatchMerkleList = async () => {
+    if (!account || !signer || chainId == null) {
+      setOrderError("请先连接钱包。");
+      return;
+    }
+    const picked = unlistedForBatch.filter((n) => batchListPicks.has(n.id));
+    if (picked.length === 0) {
+      setOrderError("请至少选择一件未挂单的 NFT。");
+      return;
+    }
+    const priceNum = Number(batchListPrice);
+    if (!Number.isFinite(priceNum) || priceNum <= 0) {
+      setOrderError("请输入有效的批量价格（BT）。");
+      return;
+    }
+    if (!batchListDeadline) {
+      setOrderError("请选择截止时间。");
+      return;
+    }
+    const deadlineIso = new Date(batchListDeadline).toISOString();
+    const deadlineSec = BigInt(Math.floor(new Date(deadlineIso).getTime() / 1000));
+    const nftAddress = getBloomNFTAddress(chainId);
+    const marketplaceAddress = getBloomMarketplaceAddress(chainId);
+    const priceWei = parseUnits(String(priceNum), 18);
+
+    setBatchListSubmitting(true);
+    setOrderError(null);
+    setOrderSuccess(null);
+    try {
+      const marketplaceAddressForApprove = getBloomMarketplaceAddress(chainId);
+      const nftContract = getBloomNFTContract(signer, chainId);
+      const approvedForAll: boolean = await nftContract.isApprovedForAll(
+        account,
+        marketplaceAddressForApprove
+      );
+      if (!approvedForAll) {
+        setOrderSuccess("正在进行 NFT 授权…");
+        const approveTx = await nftContract.setApprovalForAll(
+          marketplaceAddressForApprove,
+          true
+        );
+        await approveTx.wait();
+      }
+
+      const salts: bigint[] = [];
+      const leaves: string[] = [];
+      for (const nft of picked) {
+        const salt = randomSalt();
+        salts.push(salt);
+        leaves.push(
+          listingLeafHash(
+            nftAddress,
+            account,
+            BigInt(nft.tokenId),
+            priceWei,
+            deadlineSec,
+            salt
+          )
+        );
+      }
+      const { root, layers } = buildMerkleTreeFromLeaves(leaves);
+      const rootDeadlineSec = deadlineSec;
+
+      const batchSig = await signer.signTypedData(
+        {
+          name: "BloomMarketplace",
+          version: "1",
+          chainId,
+          verifyingContract: marketplaceAddress,
+        },
+        {
+          BatchListing: [
+            { name: "merkleRoot", type: "bytes32" },
+            { name: "seller", type: "address" },
+            { name: "rootDeadline", type: "uint256" },
+          ],
+        },
+        {
+          merkleRoot: root,
+          seller: account,
+          rootDeadline: rootDeadlineSec,
+        }
+      );
+
+      const items = picked.map((nft, idx) => {
+        const proof = getMerkleProof(layers, idx);
+        return {
+          nftListId: nft.id,
+          seller: account,
+          tokenId: nft.tokenId,
+          price: priceNum,
+          deadline: deadlineIso,
+          salt: salts[idx].toString(),
+          proof,
+        };
+      });
+
+      const resp = await fetch(API_ENDPOINTS.entryOrdersBatch, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rootDeadline: deadlineIso,
+          merkleRoot: root,
+          batchSignature: batchSig,
+          items,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data?.code !== 0) {
+        throw new Error(data?.message || "批量挂单失败");
+      }
+      setOrderSuccess("批量挂单已提交。");
+      setBatchListOpen(false);
+      await refreshPortfolio();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setOrderError(msg || "批量挂单失败");
+    } finally {
+      setBatchListSubmitting(false);
+    }
+  };
+
+  const toggleCancelBatchPick = (orderId: number) => {
+    setCancelBatchPicks((prev) => {
+      const n = new Set(prev);
+      if (n.has(orderId)) n.delete(orderId);
+      else n.add(orderId);
+      return n;
+    });
+  };
+
+  const handleCancelListingsBatch = async () => {
+    if (!account || !signer || chainId == null) {
+      setError("请先连接钱包。");
+      return;
+    }
+    const orders = listedOrders.filter(
+      (o) => cancelBatchPicks.has(o.id) && o.status === 1
+    );
+    if (orders.length === 0) {
+      setError("请勾选至少一笔进行中的挂单。");
+      return;
+    }
+    const ok = await requestConfirm({
+      title: "确认批量下架",
+      description: `将对 ${orders.length} 笔挂单执行链上批量下架，NFT 将退回钱包。`,
+    });
+    if (!ok) return;
+    setCancelBatchSubmitting(true);
+    setError(null);
+    try {
+      const mp = getBloomMarketplaceContract(signer, chainId);
+      const nftAddr = getBloomNFTAddress(chainId);
+      const listings = [];
+      for (const order of orders) {
+        const lhRaw = order.listingHash?.trim();
+        if (!lhRaw) {
+          throw new Error("部分订单缺少 listingHash，请同步后再试。");
+        }
+        const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
+        const origWei = await mp.listingOriginalPrice(lh);
+        listings.push({
+          nft: nftAddr,
+          seller: order.seller,
+          tokenId: BigInt(order.tokenId),
+          price: origWei,
+          deadline: BigInt(Math.floor(new Date(order.deadline).getTime() / 1000)),
+          salt: BigInt(order.salt ?? "0"),
+        });
+      }
+      const tx = await mp.cancelListingsBatch(listings);
+      await tx.wait();
+      setCancelBatchPicks(new Set());
+      await refreshPortfolio();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setError(msg || "批量下架失败");
+    } finally {
+      setCancelBatchSubmitting(false);
+    }
   };
 
   const handleSubmitEntryOrder = async () => {
@@ -362,11 +641,10 @@ export function Profile() {
 
     const deadlineIso = new Date(deadlineLocal).toISOString();
 
-    // EIP-712 签名：Listing(..., uint256 nonce, uint256 salt)
+    // EIP-712 签名：Listing(..., uint256 salt)
     const nftAddress = getBloomNFTAddress(chainId);
     const marketplaceAddress = getBloomMarketplaceAddress(chainId);
     const deadlineSeconds = Math.floor(new Date(deadlineIso).getTime() / 1000);
-    let nonceNum: number;
 
     // 挂单前确保 marketplace 已被 NFT 合约授权（一次授权可复用）。
     try {
@@ -391,20 +669,7 @@ export function Profile() {
       return;
     }
 
-    // 签名前实时读取链上 nonce，避免用户手动输入导致 bad nonce
-    try {
-      const marketplaceContract = getBloomMarketplaceContract(signer, chainId);
-      const onChainNonce = await marketplaceContract.nonces(account);
-      nonceNum = Number(onChainNonce);
-      if (!Number.isFinite(nonceNum) || nonceNum < 0 || !Number.isInteger(nonceNum)) {
-        setOrderError("读取链上 nonce 失败，请稍后重试。");
-        return;
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : undefined;
-      setOrderError(msg || "读取链上 nonce 失败，请稍后重试。");
-      return;
-    }
+    // 无需读取链上 nonce（避免并发/确认延迟导致 bad nonce）。
 
     const saltBig = BigInt(hexlify(randomBytes(32)));
 
@@ -415,7 +680,6 @@ export function Profile() {
         { name: "tokenId", type: "uint256" },
         { name: "price", type: "uint256" },
         { name: "deadline", type: "uint256" },
-        { name: "nonce", type: "uint256" },
         { name: "salt", type: "uint256" },
       ],
     };
@@ -433,7 +697,6 @@ export function Profile() {
       tokenId: BigInt(selectedNft.tokenId),
       price: parseUnits(String(priceNum), 18),
       deadline: BigInt(deadlineSeconds),
-      nonce: BigInt(nonceNum),
       salt: saltBig,
     };
 
@@ -453,7 +716,6 @@ export function Profile() {
       tokenId: Number(selectedNft.tokenId),
       price: priceNum,
       deadline: deadlineIso,
-      nonce: nonceNum,
       salt: saltBig.toString(),
       nftListId: Number(selectedNft.id),
       signature,
@@ -508,13 +770,19 @@ export function Profile() {
       setError(null);
 
       const marketplace = getBloomMarketplaceContract(signer, chainId);
+      const lhRaw = order.listingHash?.trim();
+      if (!lhRaw) {
+        setError("暂无 listingHash（请等待上架同步后再试）。");
+        return;
+      }
+      const listingHashHex = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
+      const origWei = await marketplace.listingOriginalPrice(listingHashHex);
       const listing = {
         nft: getBloomNFTAddress(chainId),
         seller: order.seller,
         tokenId: BigInt(order.tokenId),
-        price: parseUnits(String(order.price), 18),
+        price: origWei,
         deadline: BigInt(Math.floor(new Date(order.deadline).getTime() / 1000)),
-        nonce: BigInt(order.nonce),
         salt: BigInt(order.salt ?? "0"),
       };
 
@@ -756,6 +1024,13 @@ export function Profile() {
             >
               历史出价
             </Button>
+            <Button
+              variant="contained"
+              size="small"
+              onClick={() => openBatchListDialog()}
+            >
+              批量上架（Merkle）
+            </Button>
           </Stack>
         )}
       </Stack>
@@ -870,9 +1145,27 @@ export function Profile() {
 
               {profileTab === 1 && (
                 <TableContainer component={Paper} variant="outlined">
+                  <Stack direction="row" justifyContent="flex-end" sx={{ mb: 1 }}>
+                    <Button
+                      variant="outlined"
+                      color="warning"
+                      size="small"
+                      disabled={
+                        cancelBatchSubmitting || cancelBatchPicks.size === 0
+                      }
+                      onClick={() => void handleCancelListingsBatch()}
+                    >
+                      {cancelBatchSubmitting
+                        ? "批量下架中…"
+                        : `批量下架 (${cancelBatchPicks.size})`}
+                    </Button>
+                  </Stack>
                   <Table size="small">
                     <TableHead>
                       <TableRow>
+                        <TableCell padding="checkbox" width={40}>
+                          选
+                        </TableCell>
                         <TableCell width={80}>图片</TableCell>
                         <TableCell>名称</TableCell>
                         <TableCell>Token ID</TableCell>
@@ -888,7 +1181,7 @@ export function Profile() {
                     <TableBody>
                       {listedOrders.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={8} align="center">
+                          <TableCell colSpan={9} align="center">
                             暂无进行中的上架
                           </TableCell>
                         </TableRow>
@@ -903,6 +1196,14 @@ export function Profile() {
                           );
                           return (
                             <TableRow key={order.id} hover>
+                              <TableCell padding="checkbox">
+                                <Checkbox
+                                  size="small"
+                                  checked={cancelBatchPicks.has(order.id)}
+                                  disabled={order.status !== 1}
+                                  onChange={() => toggleCancelBatchPick(order.id)}
+                                />
+                              </TableCell>
                               <TableCell>
                                 <Box
                                   component="img"
@@ -1165,6 +1466,82 @@ export function Profile() {
           </Button>
           <Button variant="contained" onClick={() => void handleSubmitEntryOrder()} disabled={orderSubmitting}>
             {orderSubmitting ? "提交中..." : "确认挂单"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={batchListOpen}
+        onClose={() => !batchListSubmitting && setBatchListOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Merkle 批量上架</DialogTitle>
+        <DialogContent sx={{ py: 1 }}>
+          <Stack spacing={1.5} sx={{ mt: 1 }}>
+            <Alert severity="info">
+              勾选未挂单的 NFT，填写统一价格与截止时间；将签名一次 Merkle 根并由服务端逐笔
+              listWithMerkleProof 上链。Listing.nonce 为 0，请勿与单笔挂单混淆。
+            </Alert>
+            {orderError && <Alert severity="error">{orderError}</Alert>}
+            {orderSuccess && <Alert severity="success">{orderSuccess}</Alert>}
+            <TextField
+              label="统一价格（BT）"
+              type="number"
+              inputProps={{ min: 0, step: "0.0001" }}
+              value={batchListPrice}
+              fullWidth
+              size="small"
+              onChange={(e) => setBatchListPrice(e.target.value)}
+            />
+            <TextField
+              label="截止时间"
+              type="datetime-local"
+              value={batchListDeadline}
+              fullWidth
+              InputLabelProps={{ shrink: true }}
+              size="small"
+              onChange={(e) => setBatchListDeadline(e.target.value)}
+            />
+            <Typography variant="subtitle2">选择 NFT（未挂单）</Typography>
+            <Stack spacing={0.5} sx={{ maxHeight: 240, overflow: "auto" }}>
+              {unlistedForBatch.length === 0 ? (
+                <Typography color="text.secondary">暂无可批量上架的 NFT</Typography>
+              ) : (
+                unlistedForBatch.map((nft) => (
+                  <Stack
+                    key={`${nft.categoryId}-${nft.id}`}
+                    direction="row"
+                    alignItems="center"
+                    spacing={1}
+                  >
+                    <Checkbox
+                      size="small"
+                      checked={batchListPicks.has(nft.id)}
+                      onChange={() => toggleBatchListPick(nft.id)}
+                    />
+                    <Typography variant="body2">
+                      {nft.name} · Token #{nft.tokenId}
+                    </Typography>
+                  </Stack>
+                ))
+              )}
+            </Stack>
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setBatchListOpen(false)}
+            disabled={batchListSubmitting}
+          >
+            关闭
+          </Button>
+          <Button
+            variant="contained"
+            disabled={batchListSubmitting || batchListPicks.size === 0}
+            onClick={() => void handleSubmitBatchMerkleList()}
+          >
+            {batchListSubmitting ? "提交中…" : "签名并提交"}
           </Button>
         </DialogActions>
       </Dialog>
@@ -1433,12 +1810,13 @@ export function Profile() {
                     <TableCell>出价截止</TableCell>
                     <TableCell>挂单ID</TableCell>
                     <TableCell>创建时间</TableCell>
+                    <TableCell align="right">操作</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {historyBids.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={8} align="center">
+                      <TableCell colSpan={9} align="center">
                         暂无出价记录
                       </TableCell>
                     </TableRow>
@@ -1477,6 +1855,28 @@ export function Profile() {
                           {row.createTime
                             ? new Date(row.createTime).toLocaleString()
                             : "-"}
+                        </TableCell>
+                        <TableCell align="right">
+                          {account &&
+                          row.buyer.toLowerCase() === account.toLowerCase() &&
+                          (row.status === 3 ||
+                            row.status === 5 ||
+                            row.status === 6) &&
+                          row.listingHash?.trim() ? (
+                            <Button
+                              size="small"
+                              variant="contained"
+                              color="secondary"
+                              disabled={reclaimHistoryBidId === row.id}
+                              onClick={() =>
+                                void handleReclaimBidFromHistory(row)
+                              }
+                            >
+                              {reclaimHistoryBidId === row.id
+                                ? "处理中…"
+                                : "取回托管"}
+                            </Button>
+                          ) : null}
                         </TableCell>
                       </TableRow>
                     ))

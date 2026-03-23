@@ -7,7 +7,10 @@ import { Market } from "./pages/Market";
 import { TokenOwnerTool } from "./pages/TokenOwnerTool";
 
 function App() {
-  const [activeTab, setActiveTab] = useState<"airdrop" | "market" | "mint" | "profile" | "tools">("airdrop");
+  // 默认展示 Layout 的第一个入口（mint）
+  const [activeTab, setActiveTab] = useState<
+    "airdrop" | "market" | "mint" | "profile" | "tools"
+  >("mint");
 
   let content: ReactNode;
   if (activeTab === "mint") {

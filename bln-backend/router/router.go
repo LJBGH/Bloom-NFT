@@ -71,6 +71,7 @@ func SetupRouter(
 		api.GET("/order/my-bids", nftOrdersHandler.GetMyBidHistory)                             // 我的出价历史
 		api.GET("/order/bidlist/:ordersId", nftOrdersHandler.GetBidPlacedList)                  //出价列表
 		api.POST("/order/entryorders", nftOrdersHandler.EntryOrders)                            // 挂单
+		api.POST("/order/entryorders/batch", nftOrdersHandler.EntryOrdersBatch)                 // Merkle 批量挂单
 		api.POST("/order/bidplaced", nftOrdersHandler.BidPlaced)                                // 出价
 		api.POST("/order/bidaccepted", nftOrdersHandler.BidAccepted)                            // 接受出价
 	}

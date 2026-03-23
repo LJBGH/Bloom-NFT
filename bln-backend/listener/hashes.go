@@ -20,8 +20,11 @@ import (
 
 var (
 	// 以下 type hash 与 BloomMarketplace.sol 中 LISTING_TYPEHASH、BID_TYPEHASH 的字符串必须逐字一致。
-	listingTypeHash = crypto.Keccak256Hash([]byte("Listing(address nft,address seller,uint256 tokenId,uint256 price,uint256 deadline,uint256 nonce,uint256 salt)"))
-	bidTypeHash     = crypto.Keccak256Hash([]byte("Bid(bytes32 listingHash,address buyer,uint256 price,uint256 deadline,uint256 nonce)"))
+	listingTypeHash = crypto.Keccak256Hash([]byte("Listing(address nft,address seller,uint256 tokenId,uint256 price,uint256 deadline,uint256 salt)"))
+	bidTypeHash     = crypto.Keccak256Hash([]byte("Bid(bytes32 listingHash,address buyer,uint256 price,uint256 deadline,uint256 salt)"))
+	// LISTING_LEAF_TYPEHASH、BATCH_LISTING_TYPEHASH：与 BloomMarketplace.sol 中常量一致。
+	listingLeafTypeHash = crypto.Keccak256Hash([]byte("ListingLeaf(address nft,address seller,uint256 tokenId,uint256 price,uint256 deadline,uint256 salt)"))
+	batchListingTypeHash = crypto.Keccak256Hash([]byte("BatchListing(bytes32 merkleRoot,address seller,uint256 rootDeadline)"))
 	// EIP712Domain 类型定义（EIP-712 标准）；与 OZ EIP712 计算 domainSeparator 时所用一致。
 	domainTypeHash = crypto.Keccak256Hash([]byte("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
 	// 与合约 constructor EIP712("BloomMarketplace", "1") 中的 name、version 对应。
@@ -39,7 +42,6 @@ func calcListingHash(
 	tokenID uint64,
 	price *big.Int,
 	deadline uint64,
-	nonce uint64,
 	salt *big.Int,
 ) common.Hash {
 	bytes, _ := abi.Arguments{
@@ -49,7 +51,6 @@ func calcListingHash(
 		{Type: mustType("uint256")}, // 代币ID
 		{Type: mustType("uint256")}, // 价格
 		{Type: mustType("uint256")}, // 截止时间
-		{Type: mustType("uint256")}, // 非重复值
 		{Type: mustType("uint256")}, // salt
 	}.Pack(
 		listingTypeHash,
@@ -58,7 +59,6 @@ func calcListingHash(
 		new(big.Int).SetUint64(tokenID),
 		price,
 		new(big.Int).SetUint64(deadline),
-		new(big.Int).SetUint64(nonce),
 		salt,
 	)
 
@@ -75,7 +75,7 @@ func calcBidHash(
 	buyer common.Address,
 	price *big.Int,
 	deadline uint64,
-	nonce uint64,
+	salt *big.Int,
 ) common.Hash {
 	bytes, _ := abi.Arguments{
 		{Type: mustType("bytes32")}, // 类型哈希
@@ -83,14 +83,14 @@ func calcBidHash(
 		{Type: mustType("address")}, // 买家地址
 		{Type: mustType("uint256")}, // 价格
 		{Type: mustType("uint256")}, // 截止时间
-		{Type: mustType("uint256")}, // 非重复值
+		{Type: mustType("uint256")}, // salt
 	}.Pack(
 		bidTypeHash,
 		listingHash,
 		buyer,
 		price,
 		new(big.Int).SetUint64(deadline),
-		new(big.Int).SetUint64(nonce),
+		salt,
 	)
 
 	structHash := crypto.Keccak256Hash(bytes)
@@ -126,6 +126,58 @@ func calcEIP712Digest(chainID *big.Int, verifyingContract common.Address, struct
 
 	// 对整段 raw 做一次 keccak256，得到与合约 _hashTypedDataV4 相同的 32 字节 digest。
 	return crypto.Keccak256Hash(raw)
+}
+
+// CalcListingLeafHash 与链上 _listingLeafHash 一致（Merkle 叶子）。
+func CalcListingLeafHash(
+	nftAddr string,
+	sellerAddr string,
+	tokenID uint64,
+	price *big.Int,
+	deadline uint64,
+	salt *big.Int,
+) common.Hash {
+	bytes, _ := abi.Arguments{
+		{Type: mustType("bytes32")},
+		{Type: mustType("address")},
+		{Type: mustType("address")},
+		{Type: mustType("uint256")},
+		{Type: mustType("uint256")},
+		{Type: mustType("uint256")},
+		{Type: mustType("uint256")},
+	}.Pack(
+		listingLeafTypeHash,
+		common.HexToAddress(nftAddr),
+		common.HexToAddress(sellerAddr),
+		new(big.Int).SetUint64(tokenID),
+		price,
+		new(big.Int).SetUint64(deadline),
+		salt,
+	)
+	return crypto.Keccak256Hash(bytes)
+}
+
+// CalcBatchListingDigest 与链上 BatchListing EIP-712 digest 一致（卖家对 Merkle 根的一次性签名）。
+func CalcBatchListingDigest(
+	chainID *big.Int,
+	verifyingContract common.Address,
+	merkleRoot common.Hash,
+	seller common.Address,
+	rootDeadline uint64,
+) common.Hash {
+	bytes, _ := abi.Arguments{
+		{Type: mustType("bytes32")},
+		{Type: mustType("bytes32")},
+		{Type: mustType("address")},
+		{Type: mustType("uint256")},
+	}.Pack(
+		batchListingTypeHash,
+		merkleRoot,
+		seller,
+		new(big.Int).SetUint64(rootDeadline),
+	)
+	structHash := crypto.Keccak256Hash(bytes)
+	return calcEIP712Digest(chainID, verifyingContract, structHash)
 }
 
 // mustType 用于静态 ABI 类型声明，初始化失败时直接 panic。

@@ -12,15 +12,17 @@ type BidHistoryResponse struct {
 	Buyer       string       `json:"buyer"`
 	Price       float64      `json:"price"`
 	Deadline    time.Time    `json:"deadline"`
-	Nonce       int          `json:"nonce"`
-	Status      enums.Status `json:"status"`
-	StatusDesc  string       `json:"statusDesc"`
+	Salt        string       `json:"salt"`
+	Status      enums.BidStatus `json:"status"`
+	StatusDesc  string          `json:"statusDesc"`
 	Signature   string       `json:"signature"`
 	TxHash      string       `json:"txHash"`
 	CreateTime  time.Time    `json:"createTime"`
 	UpdateTime  time.Time    `json:"updateTime"`
 	NftListID   uint         `json:"nftListId"`
 	TokenId     uint         `json:"tokenId"`
-	EntrySeller string       `json:"entrySeller"`
-	ImageUrl    string       `json:"imageUrl"`
+	EntrySeller      string       `json:"entrySeller"`
+	ImageUrl         string       `json:"imageUrl"`
+	ListingHash      string       `json:"listingHash"`
+	EntryOrderStatus enums.ListingStatus `json:"entryOrderStatus"`
 }

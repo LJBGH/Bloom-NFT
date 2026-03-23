@@ -34,9 +34,8 @@ func (n *NftOrdersService) EntryOrders(request *request.EntryOrdersRequest) (str
 		TokenId:    request.TokenId,
 		Price:      request.Price,
 		Deadline:   request.Deadline,
-		Nonce:      *request.Nonce,
 		Salt:       strings.TrimSpace(request.Salt),
-		Status:     enums.Ready,
+		Status:     enums.ListingReady,
 		Signature:  request.Signature,
 		CreateTime: time.Now(),
 		UpdateTime: time.Now(),
@@ -67,12 +66,12 @@ func (n *NftOrdersService) EntryOrders(request *request.EntryOrdersRequest) (str
 
 	txHash, err := utils.ListWithSigOnChain(entry, nftContractAddr)
 	if err != nil {
-		// best-effort: 标记为失效
+		// best-effort: 上链失败记为已取消
 		_ = n.NftOrdersRepository.DB.Model(&model.EntryOrders{}).
 			Where("signature = ? AND seller = ? AND token_id = ? AND nft_list_id = ?",
 				request.Signature, request.Seller, request.TokenId, request.NftListID).
 			Updates(map[string]any{
-				"status":      enums.Invalid,
+				"status":      enums.ListingCancelled,
 				"update_time": time.Now(),
 			}).Error
 		return "", fmt.Errorf("listWithSig on-chain failed (nftListId=%d, seller=%s, tokenId=%d): %w", request.NftListID, request.Seller, request.TokenId, err)
@@ -81,13 +80,107 @@ func (n *NftOrdersService) EntryOrders(request *request.EntryOrdersRequest) (str
 	return txHash.Hex(), nil
 }
 
+// EntryOrdersBatch Merkle 批量上架：入库多笔后逐笔调用 listWithMerkleProof。
+func (n *NftOrdersService) EntryOrdersBatch(req *request.BatchEntryOrdersRequest) ([]string, error) {
+	if len(req.Items) == 0 {
+		return nil, errors.New("empty items")
+	}
+	seller0 := strings.ToLower(strings.TrimSpace(req.Items[0].Seller))
+	for _, it := range req.Items {
+		if strings.ToLower(strings.TrimSpace(it.Seller)) != seller0 {
+			return nil, errors.New("batch items must share the same seller")
+		}
+	}
+
+	now := time.Now()
+	var ids []uint
+	if err := n.NftOrdersRepository.DB.Transaction(func(tx *gorm.DB) error {
+		ids = make([]uint, 0, len(req.Items))
+		for _, it := range req.Items {
+			entry := model.EntryOrders{
+				NftListID:  it.NftListID,
+				Seller:     it.Seller,
+				TokenId:    it.TokenId,
+				Price:      it.Price,
+				Deadline:   it.Deadline,
+				Salt:       strings.TrimSpace(it.Salt),
+				Status:     enums.ListingReady,
+				Signature:  req.BatchSignature,
+				IsMerkle:   true,
+				CreateTime: now,
+				UpdateTime: now,
+			}
+			if err := tx.Create(&entry).Error; err != nil {
+				return err
+			}
+			ids = append(ids, entry.ID)
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("insert batch entry failed: %w", err)
+	}
+
+	txHashes := make([]string, 0, len(req.Items))
+	root := common.HexToHash(req.MerkleRoot)
+	rootDeadline := req.RootDeadline.Unix()
+
+	for i, it := range req.Items {
+		var entry model.EntryOrders
+		if err := n.NftOrdersRepository.DB.Where("id = ?", ids[i]).First(&entry).Error; err != nil {
+			return nil, fmt.Errorf("load entry id=%d: %w", ids[i], err)
+		}
+
+		var nftContractAddrStr string
+		if err := n.NftOrdersRepository.DB.
+			Table("nft_list").
+			Select("nft.address").
+			Joins("JOIN nft ON nft.id = nft_list.nft_id").
+			Where("nft_list.id = ?", it.NftListID).
+			Scan(&nftContractAddrStr).Error; err != nil {
+			_ = n.markBatchEntriesCancelled(ids)
+			return nil, fmt.Errorf("query nft contract address failed: %w", err)
+		}
+		nftAddr := common.HexToAddress(nftContractAddrStr)
+		if nftAddr == (common.Address{}) {
+			_ = n.markBatchEntriesCancelled(ids)
+			return nil, errors.New("invalid nft contract address")
+		}
+
+		proof := make([]common.Hash, len(it.Proof))
+		for j, p := range it.Proof {
+			proof[j] = common.HexToHash(p)
+		}
+
+		h, err := utils.ListWithMerkleProofOnChain(entry, nftAddr, proof, root, rootDeadline, req.BatchSignature)
+		if err != nil {
+			_ = n.markBatchEntriesCancelled(ids)
+			return nil, fmt.Errorf("listWithMerkleProof failed (nftListId=%d): %w", it.NftListID, err)
+		}
+		txHashes = append(txHashes, h.Hex())
+	}
+
+	return txHashes, nil
+}
+
+func (n *NftOrdersService) markBatchEntriesCancelled(ids []uint) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return n.NftOrdersRepository.DB.Model(&model.EntryOrders{}).
+		Where("id IN ?", ids).
+		Updates(map[string]any{
+			"status":      enums.ListingCancelled,
+			"update_time": time.Now(),
+		}).Error
+}
+
 // 出价
 func (n *NftOrdersService) BidPlaced(request *request.BidPlacedRequest) (string, error) {
 	var entry model.EntryOrders
 	if err := n.NftOrdersRepository.DB.Where("id = ?", request.OrdersID).First(&entry).Error; err != nil {
 		return "", fmt.Errorf("query entry order failed: %w", err)
 	}
-	if entry.Status != enums.Pending {
+	if entry.Status != enums.ListingPending {
 		return "", fmt.Errorf("entry order status is not pending (orderId=%d, status=%d)", entry.ID, entry.Status)
 	}
 
@@ -101,8 +194,8 @@ func (n *NftOrdersService) BidPlaced(request *request.BidPlacedRequest) (string,
 		Buyer:      request.Buyer,
 		Price:      request.Price,
 		Deadline:   request.Deadline,
-		Nonce:      *request.Nonce,
-		Status:     enums.Ready,
+		Salt:       strings.TrimSpace(request.Salt),
+		Status:     enums.BidReady,
 		Signature:  request.Signature,
 		CreateTime: time.Now(),
 		UpdateTime: time.Now(),
@@ -110,15 +203,15 @@ func (n *NftOrdersService) BidPlaced(request *request.BidPlacedRequest) (string,
 	if err := n.NftOrdersRepository.InsertBidPlaced(bid); err != nil {
 		return "", fmt.Errorf("insert bid failed: %w", err)
 	}
-	if err := n.NftOrdersRepository.DB.Where("orders_id = ? AND buyer = ? AND nonce = ?",
-		bid.OrdersID, bid.Buyer, bid.Nonce).Order("id DESC").First(&bid).Error; err != nil {
+	if err := n.NftOrdersRepository.DB.Where("orders_id = ? AND buyer = ? AND salt = ?",
+		bid.OrdersID, bid.Buyer, bid.Salt).Order("id DESC").First(&bid).Error; err != nil {
 		return "", fmt.Errorf("query inserted bid failed: %w", err)
 	}
 
 	txHash, err := utils.BidWithSigOnChain(bid, common.HexToHash(entryRef.ListingHash))
 	if err != nil {
 		_ = n.NftOrdersRepository.DB.Model(&model.BidPlaced{}).Where("id = ?", bid.ID).Updates(map[string]any{
-			"status":      enums.Invalid,
+			"status":      enums.BidCancelled,
 			"update_time": time.Now(),
 		}).Error
 		return "", fmt.Errorf("placeBid on-chain failed: %w", err)
@@ -142,10 +235,10 @@ func (n *NftOrdersService) BidAccepted(request *request.BidAcceptedRequest) (str
 	if !strings.EqualFold(entry.Seller, request.Seller) {
 		return "", errors.New("seller mismatch: only listing seller can accept this bid")
 	}
-	if entry.Status != enums.Pending {
+	if entry.Status != enums.ListingPending {
 		return "", fmt.Errorf("listing is not active (orderId=%d, status=%d)", entry.ID, entry.Status)
 	}
-	if bid.Status != enums.Pending {
+	if bid.Status != enums.BidPending {
 		return "", fmt.Errorf("bid is not active (bidId=%d, status=%d)", bid.ID, bid.Status)
 	}
 
@@ -187,12 +280,12 @@ func entryOrdersWithImageToResponse(entryOrders []repository.EntryOrdersWithImag
 			TokenId:     m.TokenId,
 			Price:       m.Price,
 			Deadline:    m.Deadline,
-			Nonce:       m.Nonce,
 			Salt:        m.Salt,
 			Status:      m.Status,
 			StatusDesc:  m.EntryOrders.Status.Desc(),
 			TxHash:      m.TxHash,
 			Signature:   m.Signature,
+			IsMerkle:    m.IsMerkle,
 			CreateTime:  m.CreateTime,
 			UpdateTime:  m.UpdateTime,
 			ImageUrl:    m.ImageUrl,
@@ -203,7 +296,7 @@ func entryOrdersWithImageToResponse(entryOrders []repository.EntryOrdersWithImag
 }
 
 // 获取挂单列表
-func (n *NftOrdersService) GetEntryOrdersList(nftId *uint, status *enums.Status) ([]response.EntryOrdersResponse, error) {
+func (n *NftOrdersService) GetEntryOrdersList(nftId *uint, status *enums.ListingStatus) ([]response.EntryOrdersResponse, error) {
 	entryOrders, err := n.NftOrdersRepository.GetEntryOrdersList(nftId, status)
 	if err != nil {
 		return nil, err
@@ -229,22 +322,24 @@ func (n *NftOrdersService) GetMyBidHistoryByBuyer(buyer string) ([]response.BidH
 	out := make([]response.BidHistoryResponse, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, response.BidHistoryResponse{
-			ID:          r.ID,
-			OrdersID:    r.OrdersID,
-			Buyer:       r.Buyer,
-			Price:       r.Price,
-			Deadline:    r.Deadline,
-			Nonce:       r.Nonce,
-			Status:      r.Status,
-			StatusDesc:  r.Status.Desc(),
-			Signature:   r.Signature,
-			TxHash:      r.TxHash,
-			CreateTime:  r.CreateTime,
-			UpdateTime:  r.UpdateTime,
-			NftListID:   r.NftListID,
-			TokenId:     r.TokenId,
-			EntrySeller: r.Seller,
-			ImageUrl:    r.ImageUrl,
+			ID:               r.ID,
+			OrdersID:         r.OrdersID,
+			Buyer:            r.Buyer,
+			Price:            r.Price,
+			Deadline:         r.Deadline,
+			Salt:             r.Salt,
+			Status:           r.Status,
+			StatusDesc:       r.Status.Desc(),
+			Signature:        r.Signature,
+			TxHash:           r.TxHash,
+			CreateTime:       r.CreateTime,
+			UpdateTime:       r.UpdateTime,
+			NftListID:        r.NftListID,
+			TokenId:          r.TokenId,
+			EntrySeller:      r.Seller,
+			ImageUrl:         r.ImageUrl,
+			ListingHash:      r.ListingHash,
+			EntryOrderStatus: r.EntryOrderStatus,
 		})
 	}
 	return out, nil

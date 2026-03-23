@@ -8,8 +8,16 @@ export default defineConfig({
   plugins: [hardhatToolboxMochaEthersPlugin],
   solidity: {
     profiles: {
+      // 默认即开启优化器：BloomMarketplace 未优化时超过 24KB，部署时 eth_estimateGas 会失败（节点报 Internal error）
       default: {
         version: "0.8.28",
+        settings: {
+          optimizer: {
+            enabled: true,
+            // runs 较低有利于减小部署体积；若更在意运行时 gas 可提高到 200～1000
+            runs: 200,
+          },
+        },
       },
       production: {
         version: "0.8.28",

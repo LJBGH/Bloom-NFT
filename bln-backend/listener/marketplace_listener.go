@@ -254,7 +254,6 @@ func (l *MarketplaceListener) onListed(vLog types.Log, ev *abi.Event) error {
 		TokenId  *big.Int
 		Price    *big.Int
 		Deadline *big.Int
-		Nonce    *big.Int
 		Salt     *big.Int
 	}
 
@@ -271,8 +270,8 @@ func (l *MarketplaceListener) onListed(vLog types.Log, ev *abi.Event) error {
 	// 查询订单。
 	var order model.EntryOrders
 	err := l.db.Where(
-		"seller = ? AND token_id = ? AND nonce = ? AND salt = ?",
-		strings.ToLower(seller), tokenID, data.Nonce.Int64(), data.Salt.String(),
+		"seller = ? AND token_id = ? AND salt = ?",
+		strings.ToLower(seller), tokenID, data.Salt.String(),
 	).Order("id DESC").First(&order).Error
 	if err != nil {
 		return fmt.Errorf("find entry_orders for Listed failed: %w", err)
@@ -281,7 +280,7 @@ func (l *MarketplaceListener) onListed(vLog types.Log, ev *abi.Event) error {
 	// 更新订单状态。
 	now := time.Now()
 	if err := l.db.Model(&model.EntryOrders{}).Where("id = ?", order.ID).Updates(map[string]any{
-		"status":      enums.Pending,
+		"status":      enums.ListingPending,
 		"tx_hash":     vLog.TxHash.Hex(),
 		"update_time": now,
 	}).Error; err != nil {
@@ -349,17 +348,25 @@ func (l *MarketplaceListener) onListingCancelled(vLog types.Log) error {
 	}
 	listingHash := strings.ToLower(vLog.Topics[1].Hex())
 
-	// 更新订单状态。
+	// 更新订单状态；并将该单下「进行中」的出价改为已下架，便于前端与链上一致（买家应走 cancelBid 取回托管）。
 	now := time.Now()
 	return l.db.Transaction(func(tx *gorm.DB) error {
 		var ref model.ChainRefEntryOrder
 		if err := tx.Where("listing_hash = ?", listingHash).First(&ref).Error; err != nil {
 			return fmt.Errorf("find listing ref failed: %w", err)
 		}
-		return tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
-			"status":      enums.Cancelled,
+		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
+			"status":      enums.ListingCancelled,
 			"update_time": now,
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&model.BidPlaced{}).
+			Where("orders_id = ? AND status = ?", ref.EntryOrderID, enums.BidPending).
+			Updates(map[string]any{
+				"status":      enums.BidDelisted,
+				"update_time": now,
+			}).Error
 	})
 }
 
@@ -387,7 +394,7 @@ func (l *MarketplaceListener) onBuy(vLog types.Log) error {
 		}
 		buyerLower := strings.ToLower(buyer)
 		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
-			"status":      enums.Completed,
+			"status":      enums.ListingCompleted,
 			"buyer":       buyerLower,
 			"update_time": now,
 		}).Error; err != nil {
@@ -401,9 +408,9 @@ func (l *MarketplaceListener) onBuy(vLog types.Log) error {
 		}
 		// 直购成交时，该单下仍在进行中的出价均视为未中标，买家可链上 refundLosingBid
 		return tx.Model(&model.BidPlaced{}).
-			Where("orders_id = ? AND status = ?", ref.EntryOrderID, enums.Pending).
+			Where("orders_id = ? AND status = ?", ref.EntryOrderID, enums.BidPending).
 			Updates(map[string]any{
-				"status":      enums.Outbid,
+				"status":      enums.BidOutbid,
 				"update_time": now,
 			}).Error
 	})
@@ -417,7 +424,7 @@ func (l *MarketplaceListener) onBidPlaced(vLog types.Log, ev *abi.Event) error {
 	var data struct {
 		Price    *big.Int
 		Deadline *big.Int
-		Nonce    *big.Int
+		Salt     *big.Int
 	}
 
 	// 解析事件数据。
@@ -443,15 +450,15 @@ func (l *MarketplaceListener) onBidPlaced(vLog types.Log, ev *abi.Event) error {
 
 		// 查询出价。
 		var bid model.BidPlaced
-		if err := tx.Where("orders_id = ? AND buyer = ? AND nonce = ?",
-			entryRef.EntryOrderID, buyer, data.Nonce.Int64(),
+		if err := tx.Where("orders_id = ? AND buyer = ? AND salt = ?",
+			entryRef.EntryOrderID, buyer, data.Salt.String(),
 		).Order("id DESC").First(&bid).Error; err != nil {
 			return fmt.Errorf("find bid_placed failed: %w", err)
 		}
 
 		// 更新出价状态。
 		if err := tx.Model(&model.BidPlaced{}).Where("id = ?", bid.ID).Updates(map[string]any{
-			"status":      enums.Pending,
+			"status":      enums.BidPending,
 			"tx_hash":     vLog.TxHash.Hex(),
 			"update_time": now,
 		}).Error; err != nil {
@@ -490,7 +497,7 @@ func (l *MarketplaceListener) onBidCancelled(vLog types.Log) error {
 			return fmt.Errorf("find bid ref failed: %w", err)
 		}
 		return tx.Model(&model.BidPlaced{}).Where("id = ?", ref.BidID).Updates(map[string]any{
-			"status":      enums.Cancelled,
+			"status":      enums.BidCancelled,
 			"update_time": now,
 		}).Error
 	})
@@ -533,7 +540,7 @@ func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
 		}
 		// 更新订单状态。
 		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", listingRef.EntryOrderID).Updates(map[string]any{
-			"status":      enums.Completed,
+			"status":      enums.ListingCompleted,
 			"buyer":       buyer,
 			"update_time": now,
 		}).Error; err != nil {
@@ -547,7 +554,7 @@ func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
 		}
 		// 更新中标出价状态。
 		if err := tx.Model(&model.BidPlaced{}).Where("id = ?", bidRef.BidID).Updates(map[string]any{
-			"status":      enums.Completed,
+			"status":      enums.BidCompleted,
 			"update_time": now,
 		}).Error; err != nil {
 			return err
@@ -563,9 +570,9 @@ func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
 
 		// 其余仍处于「进行中」的出价标记为未中标，买家需调用合约 refundLosingBid 取回托管 BT
 		return tx.Model(&model.BidPlaced{}).
-			Where("orders_id = ? AND id <> ? AND status = ?", listingRef.EntryOrderID, bidRef.BidID, enums.Pending).
+			Where("orders_id = ? AND id <> ? AND status = ?", listingRef.EntryOrderID, bidRef.BidID, enums.BidPending).
 			Updates(map[string]any{
-				"status":      enums.Outbid,
+				"status":      enums.BidOutbid,
 				"update_time": now,
 			}).Error
 	})
@@ -592,7 +599,7 @@ func (l *MarketplaceListener) onBidRefunded(vLog types.Log) error {
 			return fmt.Errorf("find bid ref failed: %w", err)
 		}
 		return tx.Model(&model.BidPlaced{}).Where("id = ?", ref.BidID).Updates(map[string]any{
-			"status":      enums.Refunded,
+			"status":      enums.BidRefunded,
 			"update_time": now,
 		}).Error
 	})

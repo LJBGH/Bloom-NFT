@@ -36,7 +36,7 @@ func (n *NftOrdersRepository) InsertBidPlaced(bidPlaced model.BidPlaced) error {
 }
 
 // 获取挂单列表
-func (n *NftOrdersRepository) GetEntryOrdersList(nftId *uint, status *enums.Status) ([]EntryOrdersWithImageUrl, error) {
+func (n *NftOrdersRepository) GetEntryOrdersList(nftId *uint, status *enums.ListingStatus) ([]EntryOrdersWithImageUrl, error) {
 	var entryOrders []EntryOrdersWithImageUrl
 	q := n.DB.
 		Table("entry_orders").
@@ -85,26 +85,31 @@ type BidHistoryRow struct {
 	Buyer      string       `gorm:"column:buyer"`
 	Price      float64      `gorm:"column:price"`
 	Deadline   time.Time    `gorm:"column:deadline"`
-	Nonce      int          `gorm:"column:nonce"`
-	Status     enums.Status `gorm:"column:status"`
+	Salt       string       `gorm:"column:salt"`
+	Status     enums.BidStatus `gorm:"column:status"`
 	Signature  string       `gorm:"column:signature"`
 	TxHash     string       `gorm:"column:tx_hash"`
 	CreateTime time.Time    `gorm:"column:create_time"`
 	UpdateTime time.Time    `gorm:"column:update_time"`
 	NftListID  uint         `gorm:"column:nft_list_id"`
 	TokenId    uint         `gorm:"column:token_id"`
-	Seller     string       `gorm:"column:entry_seller"`
-	ImageUrl   string       `gorm:"column:image_url"`
+	Seller           string       `gorm:"column:entry_seller"`
+	ImageUrl         string       `gorm:"column:image_url"`
+	ListingHash      string       `gorm:"column:listing_hash"`
+	EntryOrderStatus enums.ListingStatus `gorm:"column:entry_order_status"`
 }
 
 // GetBidHistoryByBuyer 当前用户作为买家的全部出价记录
 func (n *NftOrdersRepository) GetBidHistoryByBuyer(buyer string) ([]BidHistoryRow, error) {
 	var rows []BidHistoryRow
 	err := n.DB.Table("bid_placed").
-		Select(`bid_placed.id, bid_placed.orders_id, bid_placed.buyer, bid_placed.price, bid_placed.deadline, bid_placed.nonce, bid_placed.status, bid_placed.signature, bid_placed.tx_hash, bid_placed.create_time, bid_placed.update_time,
-			entry_orders.nft_list_id AS nft_list_id, entry_orders.token_id AS token_id, entry_orders.seller AS entry_seller, COALESCE(nft_list.image_url, '') AS image_url`).
+		Select(`bid_placed.id, bid_placed.orders_id, bid_placed.buyer, bid_placed.price, bid_placed.deadline, bid_placed.salt, bid_placed.status, bid_placed.signature, bid_placed.tx_hash, bid_placed.create_time, bid_placed.update_time,
+			entry_orders.nft_list_id AS nft_list_id, entry_orders.token_id AS token_id, entry_orders.seller AS entry_seller, entry_orders.status AS entry_order_status,
+			COALESCE(nft_list.image_url, '') AS image_url,
+			COALESCE(chain_ref_entry_order.listing_hash, '') AS listing_hash`).
 		Joins("INNER JOIN entry_orders ON entry_orders.id = bid_placed.orders_id").
 		Joins("LEFT JOIN nft_list ON nft_list.id = entry_orders.nft_list_id").
+		Joins("LEFT JOIN chain_ref_entry_order ON chain_ref_entry_order.entry_order_id = entry_orders.id").
 		Where("LOWER(bid_placed.buyer) = LOWER(?)", buyer).
 		Order("bid_placed.create_time DESC").
 		Scan(&rows).Error

@@ -9,6 +9,7 @@ export const API_ENDPOINTS = {
 
   // Orders
   entryOrders: `${API_BASE_URL}/api/order/entryorders`,
+  entryOrdersBatch: `${API_BASE_URL}/api/order/entryorders/batch`,
   bidPlaced: `${API_BASE_URL}/api/order/bidplaced`,
   bidAccepted: `${API_BASE_URL}/api/order/bidaccepted`,
   bidList: (ordersId: number) => `${API_BASE_URL}/api/order/bidlist/${ordersId}`,

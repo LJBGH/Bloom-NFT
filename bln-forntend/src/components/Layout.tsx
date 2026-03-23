@@ -24,18 +24,18 @@ export function Layout({ children, activeTab, onTabChange }: Props) {
               铸造
             </Button>
             <Button
-              color={activeTab === "profile" ? "primary" : "inherit"}
-              variant={activeTab === "profile" ? "contained" : "text"}
-              onClick={() => onTabChange("profile")}
-            >
-              个人
-            </Button>
-            <Button
               color={activeTab === "market" ? "primary" : "inherit"}
               variant={activeTab === "market" ? "contained" : "text"}
               onClick={() => onTabChange("market")}
             >
               市场
+            </Button>
+            <Button
+              color={activeTab === "profile" ? "primary" : "inherit"}
+              variant={activeTab === "profile" ? "contained" : "text"}
+              onClick={() => onTabChange("profile")}
+            >
+              个人
             </Button>
             <Button
               color={activeTab === "airdrop" ? "primary" : "inherit"}

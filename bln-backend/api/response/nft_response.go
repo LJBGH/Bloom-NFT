@@ -25,12 +25,11 @@ type NftListResult struct {
 	Owner       string       `json:"owner"`
 	CreateTime  time.Time    `json:"createTime"`
 	UpdateTime  time.Time    `json:"updateTime"`
-	Status      enums.Status `json:"status"`
-	StatusDesc  string       `json:"statusDesc"`
-	Price       float64      `json:"price"`
+	Status      enums.ListingStatus `json:"status"`
+	StatusDesc  string              `json:"statusDesc"`
+	Price       float64             `json:"price"`
 }
 
 func (n *NftListResult) GetStatusDesc() string {
-	// 兼容旧调用，实际描述逻辑统一下沉到 enums.Status。
 	return n.Status.Desc()
 }

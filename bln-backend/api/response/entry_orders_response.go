@@ -14,12 +14,12 @@ type EntryOrdersResponse struct {
 	TokenId    uint         `json:"tokenId" gorm:"type:int;not null"`        // tokenId
 	Price      float64      `json:"price" gorm:"type:float;not null"`        // 价格
 	Deadline   time.Time    `json:"deadline" gorm:"type:datetime; not null"` // 截止时间
-	Nonce      int          `json:"nonce" gorm:"type:int;not null"`          // 非重复 nonce
 	Salt       string       `json:"salt" gorm:"type:varchar(80);not null"`   // Listing salt（十进制）
-	Status     enums.Status `json:"status" gorm:"type:int;not null"`         // 状态
+	Status     enums.ListingStatus `json:"status" gorm:"type:int;not null"` // 挂单状态
 	StatusDesc string       `json:"statusDesc"`                              // 状态说明
 	TxHash     string       `json:"txHash" gorm:"type:varchar(256)"`         // 交易哈希
 	Signature  string       `json:"signature" gorm:"type:varchar(256)"`      // listing 签名（用于前端直连 buy）
+	IsMerkle   bool         `json:"isMerkle"`                                // Merkle 批量上架：购买时无需 listing 单笔签名
 	CreateTime time.Time    `json:"createTime" gorm:"type:datetime; not null"`
 	UpdateTime time.Time    `json:"updateTime" gorm:"type:datetime; not null"`
 	ImageUrl   string       `json:"imageUrl" gorm:"type:varchar(512);not null"` // NFT图片URL

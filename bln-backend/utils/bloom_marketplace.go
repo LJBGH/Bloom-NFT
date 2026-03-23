@@ -43,7 +43,6 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		"nftListId":   entry.NftListID,
 		"price":       entry.Price,
 		"deadline":    entry.Deadline,
-		"nonce":       entry.Nonce,
 		"salt":        entry.Salt,
 		"nftContract": nftContract.Hex(),
 	}).Info("开始执行 listWithSig 上链流程")
@@ -154,7 +153,6 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		TokenId  *big.Int
 		Price    *big.Int
 		Deadline *big.Int
-		Nonce    *big.Int
 		Salt     *big.Int
 	}{
 		Nft:      nftContract,
@@ -162,7 +160,6 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		TokenId:  new(big.Int).SetUint64(uint64(entry.TokenId)),
 		Price:    priceWei,
 		Deadline: big.NewInt(entry.Deadline.Unix()),
-		Nonce:    big.NewInt(int64(entry.Nonce)),
 		Salt:     saltWei,
 	}
 	log.WithFields(log.Fields{
@@ -171,7 +168,6 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 		"listing.tokenId":  listing.TokenId.String(),
 		"listing.priceWei": listing.Price.String(),
 		"listing.deadline": listing.Deadline.String(),
-		"listing.nonce":    listing.Nonce.String(),
 		"listing.salt":     listing.Salt.String(),
 	}).Info("listWithSig 参数组装完成")
 
@@ -195,24 +191,7 @@ func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (co
 	}
 	log.WithField("tokenAddress", tokenAddr.Hex()).Info("调用 BloomMarketplace.token() 成功")
 
-	// 第 10.2 步：读取 marketplace.nonces(seller)，检查 nonce 是否匹配
-	var nonceOut []interface{}
-	if err := contract.Call(&bind.CallOpts{Context: ctx}, &nonceOut, "nonces", listing.Seller); err != nil {
-		log.WithError(err).Error("读取 marketplace.nonces(seller) 失败")
-	} else if len(nonceOut) > 0 {
-		if onChainNonce, ok := nonceOut[0].(*big.Int); ok {
-			log.WithFields(log.Fields{
-				"seller":       listing.Seller.Hex(),
-				"requestNonce": listing.Nonce.String(),
-				"onChainNonce": onChainNonce.String(),
-				"nonceMatched": onChainNonce.Cmp(listing.Nonce) == 0,
-			}).Info("读取 marketplace.nonces(seller) 成功")
-		} else {
-			log.WithField("actualType", fmt.Sprintf("%T", nonceOut[0])).Warn("marketplace.nonces(seller) 返回类型异常")
-		}
-	}
-
-	// 第 10.3 步：读取 NFT owner/approve 信息，检查是否具备转移权限
+	// 第 10.2 步：读取 NFT owner/approve 信息，检查是否具备转移权限
 	nftABIJSON := GetContractABI("BloomNFT")
 	if strings.TrimSpace(nftABIJSON) == "" {
 		log.Warn("未找到 BloomNFT ABI，跳过 owner/approve 预检查")
@@ -360,6 +339,10 @@ func BidWithSigOnChain(bid model.BidPlaced, listingHash common.Hash) (common.Has
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("convert bid price to wei failed: %w", err)
 	}
+	bidSaltWei, err := parseListingSalt(bid.Salt)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("invalid bid salt: %w", err)
+	}
 	sigBytes, err := hexutil.Decode(bid.Signature)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("decode bid signature failed: %w", err)
@@ -370,13 +353,13 @@ func BidWithSigOnChain(bid model.BidPlaced, listingHash common.Hash) (common.Has
 		Buyer       common.Address
 		Price       *big.Int
 		Deadline    *big.Int
-		Nonce       *big.Int
+		Salt        *big.Int
 	}{
 		ListingHash: listingHash,
 		Buyer:       common.HexToAddress(bid.Buyer),
 		Price:       priceWei,
 		Deadline:    big.NewInt(bid.Deadline.Unix()),
-		Nonce:       big.NewInt(int64(bid.Nonce)),
+		Salt:        bidSaltWei,
 	}
 
 	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
@@ -396,7 +379,7 @@ func BidWithSigOnChain(bid model.BidPlaced, listingHash common.Hash) (common.Has
 
 // 接受出价上链（注意：合约要求 msg.sender == listing.seller）
 func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract common.Address, listingHash common.Hash) (common.Hash, error) {
-	if !VerifySignature(entry.Signature) {
+	if !entry.IsMerkle && !VerifySignature(entry.Signature) {
 		return common.Hash{}, errors.New("invalid listing signature")
 	}
 	if !VerifySignature(bid.Signature) {
@@ -464,9 +447,16 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("convert bid price to wei failed: %w", err)
 	}
-	listingSigBytes, err := hexutil.Decode(entry.Signature)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("decode listing signature failed: %w", err)
+	// 对 Merkle 上架的 listingHash：合约要求 listingSignature 必须为空字节（长度=0）。
+	// 由于我们把 batchSignature 也暂存到了 entry.Signature 字段里，这里强制清空。
+	var listingSigBytes []byte
+	if entry.IsMerkle {
+		listingSigBytes = []byte{}
+	} else {
+		listingSigBytes, err = decodeListingSignature(entry.Signature)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("decode listing signature failed: %w", err)
+		}
 	}
 	bidSigBytes, err := hexutil.Decode(bid.Signature)
 	if err != nil {
@@ -477,6 +467,10 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("invalid listing salt: %w", err)
 	}
+	bidSaltWei, err := parseListingSalt(bid.Salt)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("invalid bid salt: %w", err)
+	}
 
 	listingParam := struct {
 		Nft      common.Address
@@ -484,7 +478,6 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		TokenId  *big.Int
 		Price    *big.Int
 		Deadline *big.Int
-		Nonce    *big.Int
 		Salt     *big.Int
 	}{
 		Nft:      nftContract,
@@ -492,7 +485,6 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		TokenId:  new(big.Int).SetUint64(uint64(entry.TokenId)),
 		Price:    listingOrigWei,
 		Deadline: big.NewInt(entry.Deadline.Unix()),
-		Nonce:    big.NewInt(int64(entry.Nonce)),
 		Salt:     listingSalt,
 	}
 	bidParam := struct {
@@ -500,13 +492,13 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 		Buyer       common.Address
 		Price       *big.Int
 		Deadline    *big.Int
-		Nonce       *big.Int
+		Salt        *big.Int
 	}{
 		ListingHash: listingHash,
 		Buyer:       common.HexToAddress(bid.Buyer),
 		Price:       bidPriceWei,
 		Deadline:    big.NewInt(bid.Deadline.Unix()),
-		Nonce:       big.NewInt(int64(bid.Nonce)),
+		Salt:        bidSaltWei,
 	}
 
 	tx, err := contract.Transact(auth, "acceptBid", listingParam, listingSigBytes, bidParam, bidSigBytes)
@@ -520,6 +512,139 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 	if receipt.Status != types.ReceiptStatusSuccessful {
 		return tx.Hash(), errors.New("acceptBid transaction reverted")
 	}
+	return tx.Hash(), nil
+}
+
+// decodeListingSignature Merkle 上架的 entry_orders.signature 可为空；单笔挂单为 65 字节 EIP-712 签名。
+func decodeListingSignature(sig string) ([]byte, error) {
+	s := strings.TrimSpace(sig)
+	if s == "" {
+		return []byte{}, nil
+	}
+	b, err := hexutil.Decode(s)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// ListWithMerkleProofOnChain 执行 BloomMarketplace.listWithMerkleProof（leaf 与 Listing.nonce=0 一致）。
+func ListWithMerkleProofOnChain(
+	entry model.EntryOrders, // 挂单信息
+	nftContract common.Address, // NFT合约地址
+	proof []common.Hash, // 证明
+	merkleRoot common.Hash, // Merkle根
+	rootDeadlineUnix int64, // 根截止时间
+	batchSig string, // 批次签名
+) (common.Hash, error) {
+	// 验证批次签名
+	if !VerifySignature(batchSig) {
+		return common.Hash{}, errors.New("invalid batch signature")
+	}
+	// 准备 RPC 地址
+	if strings.TrimSpace(rpcUrl) == "" {
+		rpcUrl = strings.TrimSpace(config.AppConfig.NetWork.RpcUrl)
+	}
+	// 连接 RPC 节点
+	if strings.TrimSpace(rpcUrl) == "" {
+		return common.Hash{}, errors.New("rpc url is empty")
+	}
+	// 连接 RPC 节点
+	client, err := ethclient.Dial(rpcUrl)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("dial rpc failed: %w", err)
+	}
+	defer client.Close()
+
+	// 创建上下文
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// 读取链 ID
+	chainID, err := client.ChainID(ctx)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("get chain id failed: %w", err)
+	}
+
+	// 加载私钥并创建交易签名器
+	privateKeyHex := strings.TrimPrefix(strings.TrimSpace(config.AppConfig.NetWork.AccountPrivateKey), "0x")
+	privateKey, err := crypto.HexToECDSA(privateKeyHex)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("parse private key failed: %w", err)
+	}
+	// 创建交易签名器
+	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("create transactor failed: %w", err)
+	}
+	// 设置上下文
+	auth.Context = ctx
+	auth.Value = big.NewInt(0)
+	auth.GasLimit = uint64(6_000_000)
+	// 获取合约地址
+	marketplaceAddrHex := GetContractAddress(contractName)
+	if marketplaceAddrHex == "" {
+		return common.Hash{}, errors.New("BloomMarketplace address not found")
+	}
+	marketplaceAddr := common.HexToAddress(marketplaceAddrHex)
+	// 获取合约 ABI
+	abiJSON := GetContractABI(contractName)
+	if strings.TrimSpace(abiJSON) == "" {
+		return common.Hash{}, errors.New("BloomMarketplace ABI not found")
+	}
+	// 解析合约 ABI
+	parsedABI, err := abi.JSON(strings.NewReader(abiJSON))
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("parse BloomMarketplace ABI failed: %w", err)
+	}
+	// 把浮点价格字符串转成 18 位最小单位
+	priceWei, err := btToWei(entry.Price)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("convert price to wei failed: %w", err)
+	}
+	// 解析挂单 EIP-712 中的 salt（十进制字符串，或 0x 十六进制）。
+	saltWei, err := parseListingSalt(entry.Salt)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("invalid listing salt: %w", err)
+	}
+	// 解码批次签名
+	batchSigBytes, err := hexutil.Decode(batchSig)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("decode batch signature failed: %w", err)
+	}
+	// 组装 listing 参数
+	listing := struct {
+		Nft      common.Address
+		Seller   common.Address
+		TokenId  *big.Int
+		Price    *big.Int
+		Deadline *big.Int
+		Salt     *big.Int
+	}{
+		Nft:      nftContract,
+		Seller:   common.HexToAddress(entry.Seller),
+		TokenId:  new(big.Int).SetUint64(uint64(entry.TokenId)),
+		Price:    priceWei,
+		Deadline: big.NewInt(entry.Deadline.Unix()),
+		Salt:     saltWei,
+	}
+	// 创建合约实例
+	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
+	// 发送 listWithMerkleProof 交易
+	tx, err := contract.Transact(auth, "listWithMerkleProof", listing, proof, merkleRoot, big.NewInt(rootDeadlineUnix), batchSigBytes)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("call listWithMerkleProof transact failed: %w", err)
+	}
+	// 等待交易上链
+	receipt, err := bind.WaitMined(ctx, client, tx)
+	if err != nil {
+		return tx.Hash(), fmt.Errorf("wait listWithMerkleProof mined failed: %w", err)
+	}
+	// 等待交易上链
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return tx.Hash(), errors.New("listWithMerkleProof transaction reverted")
+	}
+	// 返回交易哈希
 	return tx.Hash(), nil
 }
 

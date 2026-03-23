@@ -25,8 +25,9 @@ import {
   Stack,
   TextField,
   Typography,
+  Checkbox,
 } from "@mui/material";
-import { parseUnits } from "ethers";
+import { hexlify, parseUnits, randomBytes } from "ethers";
 import { useEffect, useState } from "react";
 import { API_ENDPOINTS } from "../config/api";
 import { useConfirmDialog } from "../components/ConfirmDialog";
@@ -46,7 +47,6 @@ interface EntryOrder {
   tokenId: number;
   price: number;
   deadline: string; // backend time.Time (string)
-  nonce: number;
   /** Listing EIP-712 salt（十进制字符串） */
   salt?: string;
   status: number;
@@ -57,6 +57,8 @@ interface EntryOrder {
   imageUrl: string;
   /** 链上 listingHash，未上链同步前可能为空 */
   listingHash?: string;
+  /** Merkle 批量上架：购买时无需 listing 单笔签名 */
+  isMerkle?: boolean;
 }
 
 interface BidItem {
@@ -65,7 +67,7 @@ interface BidItem {
   buyer: string;
   price: number;
   deadline: string;
-  nonce: number;
+  salt: string;
   status: number;
   txHash?: string;
   signature?: string;
@@ -82,9 +84,9 @@ function bidStatusText(status: number) {
     case 3:
       return "已过期";
     case 4:
-      return "已取消";
+      return "取消出价";
     case 5:
-      return "已失效";
+      return "已下架";
     case 6:
       return "未中标";
     case 7:
@@ -119,6 +121,10 @@ export function Market() {
   const [bidList, setBidList] = useState<BidItem[]>([]);
   const [bidListLoading, setBidListLoading] = useState(false);
   const [refundBidId, setRefundBidId] = useState<number | null>(null);
+  const [cancelBidId, setCancelBidId] = useState<number | null>(null);
+  /** 购物车：订单 id 集合，用于 buyBatch */
+  const [cartIds, setCartIds] = useState<Set<number>>(() => new Set());
+  const [buyBatchSubmitting, setBuyBatchSubmitting] = useState(false);
 
   const defaultDeadlineLocal = () => {
     const d = new Date();
@@ -198,11 +204,16 @@ export function Market() {
         tokenId: BigInt(order.tokenId),
         price: origWei,
         deadline: BigInt(Math.floor(new Date(order.deadline).getTime() / 1000)),
-        nonce: BigInt(order.nonce),
         salt: BigInt(order.salt || "0"),
       };
 
-      const tx = await marketplace.buy(listing, order.signature);
+      const listingSig =
+        order.isMerkle === true
+          ? "0x"
+          : order.signature.startsWith("0x")
+            ? order.signature
+            : `0x${order.signature}`;
+      const tx = await marketplace.buy(listing, listingSig);
       await tx.wait();
       setSuccess("购买交易已提交并确认。");
       await fetchOrders();
@@ -211,6 +222,89 @@ export function Market() {
       setError(msg || "购买失败");
     } finally {
       setBuySubmittingId(null);
+    }
+  };
+
+  const toggleCart = (orderId: number) => {
+    setCartIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(orderId)) n.delete(orderId);
+      else n.add(orderId);
+      return n;
+    });
+  };
+
+  const handleBuyBatch = async () => {
+    if (!isConnected || !account || chainId == null || !signer) {
+      setError("请先连接钱包。");
+      return;
+    }
+    const selected = orders.filter((o) => cartIds.has(o.id) && o.status === 1);
+    if (selected.length < 2) {
+      setError("请至少勾选 2 个「进行中」订单用于批量购买。");
+      return;
+    }
+    setBuyBatchSubmitting(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const marketplaceAddress = getBloomMarketplaceAddress(chainId);
+      const tokenContract = getBloomTokenContract(signer, chainId);
+      const marketplace = getBloomMarketplaceContract(signer, chainId);
+      const nftAddr = getBloomNFTAddress(chainId);
+
+      const listings: Array<{
+        nft: string;
+        seller: string;
+        tokenId: bigint;
+        price: bigint;
+        deadline: bigint;
+        salt: bigint;
+      }> = [];
+      const sigs: string[] = [];
+      let totalPay = 0n;
+      for (const o of selected) {
+        const lhRaw = o.listingHash?.trim();
+        if (!lhRaw) {
+          throw new Error("某条订单缺少 listingHash，请等待同步后重试。");
+        }
+        const listingHashHex = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
+        const origWei = await marketplace.listingOriginalPrice(listingHashHex);
+        const payWei = await marketplace.effectiveListingPrice(listingHashHex);
+        totalPay += payWei;
+        listings.push({
+          nft: nftAddr,
+          seller: o.seller,
+          tokenId: BigInt(o.tokenId),
+          price: origWei,
+          deadline: BigInt(Math.floor(new Date(o.deadline).getTime() / 1000)),
+          salt: BigInt(o.salt || "0"),
+        });
+        const sig =
+          o.isMerkle === true
+            ? "0x"
+            : o.signature.startsWith("0x")
+              ? o.signature
+              : `0x${o.signature}`;
+        sigs.push(sig);
+      }
+
+      const allowance: bigint = await tokenContract.allowance(account, marketplaceAddress);
+      if (allowance < totalPay) {
+        const approveTx = await tokenContract.approve(marketplaceAddress, totalPay);
+        await approveTx.wait();
+      }
+
+      const tx = await marketplace.buyBatch(listings, sigs);
+      await tx.wait();
+      setSuccess(`批量购买已确认（${selected.length} 笔）。`);
+      setCartIds(new Set());
+      await fetchOrders();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setError(msg || "批量购买失败");
+    } finally {
+      setBuyBatchSubmitting(false);
     }
   };
 
@@ -253,9 +347,8 @@ export function Market() {
         await approveTx.wait();
       }
 
-      const marketplace = getBloomMarketplaceContract(signer, chainId);
-      const onChainNonce = await marketplace.nonces(account);
-      const nonceNum = Number(onChainNonce);
+      // Bid 需要 salt 用于唯一标识 bid（合约层面进入 EIP-712 计算）。
+      const bidSaltBig = BigInt(hexlify(randomBytes(32)));
       // Bid.listingHash 必须与链上一致：不能用「当前 order.price」重算 Listing，否则降价后
       // 会得到错误 hash，与后端上链时使用的 listingHash 不一致 → bad bid sig
       const listingHash = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
@@ -272,7 +365,7 @@ export function Market() {
             { name: "buyer", type: "address" },
             { name: "price", type: "uint256" },
             { name: "deadline", type: "uint256" },
-            { name: "nonce", type: "uint256" },
+            { name: "salt", type: "uint256" },
           ],
         },
         {
@@ -280,7 +373,7 @@ export function Market() {
           buyer: account,
           price: priceWei,
           deadline: BigInt(deadlineSec),
-          nonce: BigInt(nonceNum),
+          salt: bidSaltBig,
         }
       );
 
@@ -292,7 +385,7 @@ export function Market() {
           buyer: account,
           price: priceNum,
           deadline: deadlineIso,
-          nonce: nonceNum,
+          salt: bidSaltBig.toString(),
           signature,
         }),
       });
@@ -311,22 +404,22 @@ export function Market() {
     }
   };
 
-  const handleRefundLosingBid = async (bid: BidItem) => {
+  /**
+   * 取回托管 BT：链上若该 listing 未成交（sold=false），应走 cancelBid（含：卖家撤单、挂单仍有效时买家主动撤价）；
+   * 若已成交且本笔为未中标，走 refundLosingBid（需当初出价 EIP-712 签名）。
+   */
+  const handleReclaimBidEscrow = async (bid: BidItem) => {
     const ok = await requestConfirm({
-      title: "确认领取托管退款",
-      description: `确定领取该笔托管退款吗？\n\n金额约：${bid.price} BT\n\n确认后将发起链上交易；若使用浏览器钱包，随后还会在钱包中确认。`,
+      title: "确认取回托管 BT",
+      description: `将按链上规则取回托管款（约 ${bid.price} BT）。若挂单未成交将调用「撤回出价」；若已成交且未中标将调用「未中标退款」。`,
     });
     if (!ok) return;
     if (!detailOrder || !signer || chainId == null || !account) {
       setError("请先连接钱包。");
       return;
     }
-    if (!detailOrder.listingHash) {
+    if (!detailOrder.listingHash?.trim()) {
       setError("缺少 listingHash（挂单可能尚未完成链上同步），请稍后重试或刷新列表。");
-      return;
-    }
-    if (!bid.signature) {
-      setError("缺少出价签名数据，无法退款。");
       return;
     }
     setRefundBidId(bid.id);
@@ -334,26 +427,86 @@ export function Market() {
     setSuccess(null);
     try {
       const mp = getBloomMarketplaceContract(signer, chainId);
-      const lh = detailOrder.listingHash.startsWith("0x")
-        ? detailOrder.listingHash
-        : `0x${detailOrder.listingHash}`;
+      const lhRaw = detailOrder.listingHash.trim();
+      const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
       const bidStruct = {
         listingHash: lh,
         buyer: bid.buyer,
         price: parseUnits(String(bid.price), 18),
         deadline: BigInt(Math.floor(new Date(bid.deadline).getTime() / 1000)),
-        nonce: BigInt(bid.nonce),
+        salt: BigInt(bid.salt),
       };
-      const sig = bid.signature.startsWith("0x") ? bid.signature : `0x${bid.signature}`;
-      const tx = await mp.refundLosingBid(bidStruct, sig);
+      const sold: boolean = await mp.sold(lh);
+      let tx;
+      if (!sold) {
+        tx = await mp.cancelBid(bidStruct);
+      } else {
+        if (!bid.signature) {
+          setError("缺少出价签名数据，无法领取未中标退款。");
+          return;
+        }
+        const sig = bid.signature.startsWith("0x") ? bid.signature : `0x${bid.signature}`;
+        tx = await mp.refundLosingBid(bidStruct, sig);
+      }
       await tx.wait();
-      setSuccess("托管款已退回至钱包，数据库状态将在监听器同步后更新。");
+      setSuccess("交易已确认，托管款将退回钱包；数据库状态由监听器同步。");
       await openOrderDetail(detailOrder);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : undefined;
-      setError(msg || "领取退款失败");
+      setError(msg || "取回托管失败");
     } finally {
       setRefundBidId(null);
+    }
+  };
+
+  const handleCancelBid = async (bid: BidItem) => {
+    if (!detailOrder || !signer || chainId == null || !account) {
+      setError("请先连接钱包。");
+      return;
+    }
+    if (detailOrder.status !== 1) {
+      setError("当前挂单不在进行中状态，无法撤回出价。");
+      return;
+    }
+    if (bid.buyer.toLowerCase() !== account.toLowerCase()) {
+      setError("只能由出价者本人撤回出价。");
+      return;
+    }
+    if (!detailOrder.listingHash?.trim()) {
+      setError("缺少 listingHash（挂单可能尚未完成链上同步），请稍后重试或刷新列表。");
+      return;
+    }
+
+    const ok = await requestConfirm({
+      title: "确认撤回出价",
+      description: `将撤回该笔出价并取回托管 BT（约 ${bid.price} BT）。`,
+    });
+    if (!ok) return;
+
+    setCancelBidId(bid.id);
+    setError(null);
+    setSuccess(null);
+    try {
+      const mp = getBloomMarketplaceContract(signer, chainId);
+      const lhRaw = detailOrder.listingHash.trim();
+      const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
+      const bidStruct = {
+        listingHash: lh,
+        buyer: bid.buyer,
+        price: parseUnits(String(bid.price), 18),
+        deadline: BigInt(Math.floor(new Date(bid.deadline).getTime() / 1000)),
+        salt: BigInt(bid.salt),
+      };
+
+      const tx = await mp.cancelBid(bidStruct);
+      await tx.wait();
+      setSuccess("撤回出价已确认，托管款将退回。");
+      await openOrderDetail(detailOrder);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : undefined;
+      setError(msg || "撤回出价失败");
+    } finally {
+      setCancelBidId(null);
     }
   };
 
@@ -402,11 +555,11 @@ export function Market() {
               }}
             >
               <MenuItem value="">全部</MenuItem>
+              <MenuItem value={0}>准备中</MenuItem>
               <MenuItem value={1}>进行中</MenuItem>
               <MenuItem value={2}>已成交</MenuItem>
               <MenuItem value={3}>已过期</MenuItem>
               <MenuItem value={4}>已取消</MenuItem>
-              <MenuItem value={5}>已失效</MenuItem>
             </Select>
           </FormControl>
         </Stack>
@@ -427,9 +580,22 @@ export function Market() {
 
       {!loading && !error && orders.length > 0 && !detailOrder && (
         <TableContainer component={Paper} variant="outlined">
+          <Stack direction="row" justifyContent="flex-end" sx={{ mb: 1 }}>
+            <Button
+              variant="contained"
+              color="secondary"
+              disabled={buyBatchSubmitting || cartIds.size < 2}
+              onClick={() => void handleBuyBatch()}
+            >
+              {buyBatchSubmitting ? "批量购买中…" : `购物车批量购买 (${cartIds.size})`}
+            </Button>
+          </Stack>
           <Table>
             <TableHead>
               <TableRow>
+                <TableCell padding="checkbox" width={48}>
+                  购物车
+                </TableCell>
                 <TableCell>NFT</TableCell>
                 <TableCell>价格</TableCell>
                 <TableCell>截止时间</TableCell>
@@ -441,6 +607,15 @@ export function Market() {
             <TableBody>
               {orders.map((o) => (
                 <TableRow key={o.id} hover>
+                  <TableCell padding="checkbox">
+                    <Checkbox
+                      size="small"
+                      checked={cartIds.has(o.id)}
+                      disabled={o.status !== 1}
+                      onChange={() => toggleCart(o.id)}
+                      inputProps={{ "aria-label": `cart ${o.id}` }}
+                    />
+                  </TableCell>
                   <TableCell>
                     <Box sx={{ display: "flex", alignItems: "center", gap: 1.5 }}>
                       <Box
@@ -544,8 +719,15 @@ export function Market() {
                 </TableHead>
                 <TableBody>
                   {bidList.map((b) => {
-                    const canRefund =
-                      b.status === 6 &&
+                    // 仅「已过期 / 已下架 / 未中标」可取回托管；进行中/取消出价单由链上事件维护状态
+                    const canCancel =
+                      detailOrder &&
+                      detailOrder.status === 1 &&
+                      b.status === 1 &&
+                      account &&
+                      b.buyer.toLowerCase() === account.toLowerCase();
+                    const canReclaim =
+                      (b.status === 3 || b.status === 5 || b.status === 6) &&
                       account &&
                       b.buyer.toLowerCase() === account.toLowerCase();
                     return (
@@ -555,15 +737,26 @@ export function Market() {
                       <TableCell>{formatDateTime(b.deadline)}</TableCell>
                       <TableCell>{bidStatusText(b.status)}</TableCell>
                       <TableCell align="right">
-                        {canRefund && (
+                        {canReclaim && (
                           <Button
                             size="small"
                             variant="contained"
                             color="secondary"
                             disabled={refundBidId === b.id}
-                            onClick={() => void handleRefundLosingBid(b)}
+                            onClick={() => void handleReclaimBidEscrow(b)}
                           >
-                            {refundBidId === b.id ? "退款中..." : "领取托管退款"}
+                            {refundBidId === b.id ? "处理中..." : "取回托管 BT"}
+                          </Button>
+                        )}
+                        {canCancel && (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="secondary"
+                            disabled={cancelBidId === b.id}
+                            onClick={() => void handleCancelBid(b)}
+                          >
+                            {cancelBidId === b.id ? "处理中..." : "撤回出价"}
                           </Button>
                         )}
                       </TableCell>

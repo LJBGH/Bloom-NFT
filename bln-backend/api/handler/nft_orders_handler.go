@@ -48,6 +48,20 @@ func (n *NftOrdersHandler) EntryOrders(c *gin.Context) {
 	c.JSON(http.StatusOK, model.OkWithData(txHash))
 }
 
+// EntryOrdersBatch Merkle 批量上架
+// @Router /order/entryorders/batch [post]
+func (n *NftOrdersHandler) EntryOrdersBatch(c *gin.Context) {
+	var req request.BatchEntryOrdersRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+	}
+	txHashes, err := n.NftOrdersService.EntryOrdersBatch(&req)
+	if err != nil {
+		panic(middleware.NewBusinessError(enums.FAILED, err))
+	}
+	c.JSON(http.StatusOK, model.OkWithData(txHashes))
+}
+
 // 出价
 // @Summary      创建出价
 // @Description  对某个挂单订单进行出价（bid placed）
@@ -124,14 +138,14 @@ func (n *NftOrdersHandler) GetEntryOrdersList(c *gin.Context) {
 	}
 
 	statusStr := c.Query("status")
-	var statusPtr *enums.Status
+	var statusPtr *enums.ListingStatus
 	if statusStr != "" {
 		statusParsed, err := strconv.ParseUint(statusStr, 10, 0)
 		if err != nil {
 			panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 		}
-		tmp := enums.Status(statusParsed)
-		if tmp > enums.Refunded {
+		tmp := enums.ListingStatus(statusParsed)
+		if tmp > enums.ListingCancelled {
 			panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 		}
 		statusPtr = &tmp
