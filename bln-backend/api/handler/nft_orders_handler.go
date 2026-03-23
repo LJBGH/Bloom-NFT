@@ -123,7 +123,21 @@ func (n *NftOrdersHandler) GetEntryOrdersList(c *gin.Context) {
 		nftIdPtr = &tmp
 	}
 
-	respList, err := n.NftOrdersService.GetEntryOrdersList(nftIdPtr)
+	statusStr := c.Query("status")
+	var statusPtr *enums.Status
+	if statusStr != "" {
+		statusParsed, err := strconv.ParseUint(statusStr, 10, 0)
+		if err != nil {
+			panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+		}
+		tmp := enums.Status(statusParsed)
+		if tmp > enums.Refunded {
+			panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
+		}
+		statusPtr = &tmp
+	}
+
+	respList, err := n.NftOrdersService.GetEntryOrdersList(nftIdPtr, statusPtr)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}

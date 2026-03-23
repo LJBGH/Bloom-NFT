@@ -203,8 +203,8 @@ func entryOrdersWithImageToResponse(entryOrders []repository.EntryOrdersWithImag
 }
 
 // 获取挂单列表
-func (n *NftOrdersService) GetEntryOrdersList(nftId *uint) ([]response.EntryOrdersResponse, error) {
-	entryOrders, err := n.NftOrdersRepository.GetEntryOrdersList(nftId)
+func (n *NftOrdersService) GetEntryOrdersList(nftId *uint, status *enums.Status) ([]response.EntryOrdersResponse, error) {
+	entryOrders, err := n.NftOrdersRepository.GetEntryOrdersList(nftId, status)
 	if err != nil {
 		return nil, err
 	}

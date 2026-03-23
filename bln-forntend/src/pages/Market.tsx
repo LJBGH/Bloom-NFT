@@ -12,12 +12,16 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
+  InputLabel,
   Table,
   TableBody,
   TableCell,
   TableContainer,
   TableHead,
   TableRow,
+  Select,
+  MenuItem,
   Stack,
   TextField,
   Typography,
@@ -104,6 +108,7 @@ export function Market() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [orders, setOrders] = useState<EntryOrder[]>([]);
+  const [statusFilter, setStatusFilter] = useState<number | "">("");
   const [buySubmittingId, setBuySubmittingId] = useState<number | null>(null);
   const [bidSubmittingId, setBidSubmittingId] = useState<number | null>(null);
   const [bidDialogOpen, setBidDialogOpen] = useState(false);
@@ -128,7 +133,11 @@ export function Market() {
     setLoading(true);
     setError(null);
     try {
-      const resp = await fetch(API_ENDPOINTS.orderList());
+      const resp = await fetch(
+        API_ENDPOINTS.orderList({
+          status: statusFilter === "" ? undefined : statusFilter,
+        })
+      );
       const data = await resp.json();
       if (!resp.ok || data?.code !== 0) {
         throw new Error(data?.message || "获取挂单列表失败");
@@ -371,13 +380,37 @@ export function Market() {
   useEffect(() => {
     void fetchOrders();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [statusFilter]);
 
   return (
     <Box>
       <Typography variant="h4" sx={{ mb: 3, fontWeight: 700 }}>
         市场挂单列表
       </Typography>
+
+      {!detailOrder && (
+        <Stack direction="row" sx={{ mb: 2 }}>
+          <FormControl size="small" sx={{ minWidth: 220 }}>
+            <InputLabel id="market-status-filter-label">状态筛选</InputLabel>
+            <Select
+              labelId="market-status-filter-label"
+              label="状态筛选"
+              value={statusFilter}
+              onChange={(e) => {
+                const v = e.target.value as string | number;
+                setStatusFilter(typeof v === "string" && v === "" ? "" : Number(v));
+              }}
+            >
+              <MenuItem value="">全部</MenuItem>
+              <MenuItem value={1}>进行中</MenuItem>
+              <MenuItem value={2}>已成交</MenuItem>
+              <MenuItem value={3}>已过期</MenuItem>
+              <MenuItem value={4}>已取消</MenuItem>
+              <MenuItem value={5}>已失效</MenuItem>
+            </Select>
+          </FormControl>
+        </Stack>
+      )}
 
       {loading && (
         <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>

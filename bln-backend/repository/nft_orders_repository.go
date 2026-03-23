@@ -36,31 +36,26 @@ func (n *NftOrdersRepository) InsertBidPlaced(bidPlaced model.BidPlaced) error {
 }
 
 // 获取挂单列表
-func (n *NftOrdersRepository) GetEntryOrdersList(nftId *uint) ([]EntryOrdersWithImageUrl, error) {
+func (n *NftOrdersRepository) GetEntryOrdersList(nftId *uint, status *enums.Status) ([]EntryOrdersWithImageUrl, error) {
 	var entryOrders []EntryOrdersWithImageUrl
+	q := n.DB.
+		Table("entry_orders").
+		Select("entry_orders.*, nft_list.image_url AS image_url, chain_ref_entry_order.listing_hash AS listing_hash").
+		Joins("LEFT JOIN nft_list ON nft_list.id = entry_orders.nft_list_id").
+		Joins("LEFT JOIN chain_ref_entry_order ON chain_ref_entry_order.entry_order_id = entry_orders.id")
+
 	if nftId != nil {
 		// nftId 对应的是 entry_orders.nft_list_id
-		if err := n.DB.
-			Table("entry_orders").
-			Select("entry_orders.*, nft_list.image_url AS image_url, chain_ref_entry_order.listing_hash AS listing_hash").
-			Joins("LEFT JOIN nft_list ON nft_list.id = entry_orders.nft_list_id").
-			Joins("LEFT JOIN chain_ref_entry_order ON chain_ref_entry_order.entry_order_id = entry_orders.id").
-			Where("entry_orders.nft_list_id = ?", nftId).
-			Order("entry_orders.create_time DESC").
-			Find(&entryOrders).Error; err != nil {
-			return nil, err
-		}
+		q = q.Where("entry_orders.nft_list_id = ?", *nftId)
+	}
+	if status != nil {
+		q = q.Where("entry_orders.status = ?", *status)
+	}
 
-	} else {
-		if err := n.DB.
-			Table("entry_orders").
-			Select("entry_orders.*, nft_list.image_url AS image_url, chain_ref_entry_order.listing_hash AS listing_hash").
-			Joins("LEFT JOIN nft_list ON nft_list.id = entry_orders.nft_list_id").
-			Joins("LEFT JOIN chain_ref_entry_order ON chain_ref_entry_order.entry_order_id = entry_orders.id").
-			Order("entry_orders.create_time DESC").
-			Find(&entryOrders).Error; err != nil {
-			return nil, err
-		}
+	if err := q.
+		Order("entry_orders.create_time DESC").
+		Find(&entryOrders).Error; err != nil {
+		return nil, err
 	}
 
 	return entryOrders, nil
