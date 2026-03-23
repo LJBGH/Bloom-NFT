@@ -1,8 +1,8 @@
 # Bloom-NFT
 
-Bloom-NFT 是一个基于区块链的 NFT 市场学习/演示项目，包含合约、后端与前端三部分。
+Bloom-NFT 是一个基于以太坊区块链的 NFT 市场项目，包含合约、后端与前端三部分，主要有NFT铸造、二级市场交易、订单撮合、链上日志监听等核心功能。
 
-项目资料与架构设计可参考：`Bloom-NFT-Architecture-and-Market-Design.md`
+项目资料与架构设计可参考：[Bloom-NFT-Architecture-and-Market-Design.md](./Bloom-NFT-Architecture-and-Market-Design.md)
 
 ## 架构说明
 
@@ -52,11 +52,10 @@ Bloom-NFT 是一个基于区块链的 NFT 市场学习/演示项目，包含合�
   npm install
   npm run dev
   ```
+
 - 本地浏览器查看
   `http://localhost:5173/`
-
 
 ## 安全提示
 
 请不要把 `config.yml/config.production.yml` 里的私钥、JWT Secret 等敏感信息公开提交。
-
