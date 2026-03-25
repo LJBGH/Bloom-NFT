@@ -67,8 +67,8 @@ func expireOnce() error {
 		// 2) 出价过期：BidPending -> BidExpired
 		// 只处理挂单处于 Pending/Expired 的出价，避免污染 completed/cancelled 数据。
 		bidRes := tx.Exec(`
-			UPDATE bid_placed b
-			JOIN entry_orders o ON o.id = b.orders_id
+			UPDATE orders_bid b
+			JOIN orders_entry o ON o.id = b.orders_id
 			SET b.status = ?, b.update_time = ?
 			WHERE b.status = ?
 				AND o.status IN (?, ?)

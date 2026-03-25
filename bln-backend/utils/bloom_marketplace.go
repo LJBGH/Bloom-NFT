@@ -18,7 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
-	log "github.com/sirupsen/logrus"
 )
 
 var rpcUrl string = config.AppConfig.NetWork.RpcUrl
@@ -33,437 +32,147 @@ func VerifySignature(signature string) bool {
 	return len(sigBytes) == 65
 }
 
-// ListWithSigOnChain 执行 BloomMarketplace.listWithSig 上链调用。
-// 需要卖家已提前 approve NFT 给 marketplace 合约。
-func ListWithSigOnChain(entry model.EntryOrders, nftContract common.Address) (common.Hash, error) {
-	// 打印入口关键参数，便于按请求维度排查
-	log.WithFields(log.Fields{
-		"seller":      entry.Seller,
-		"tokenId":     entry.TokenId,
-		"nftListId":   entry.NftListID,
-		"price":       entry.Price,
-		"deadline":    entry.Deadline,
-		"salt":        entry.Salt,
-		"nftContract": nftContract.Hex(),
-	}).Info("开始执行 listWithSig 上链流程")
-
-	// 第 1 步：校验签名格式
-	if !VerifySignature(entry.Signature) {
-		log.Error("签名校验失败：signature 不是 65 字节十六进制")
-		return common.Hash{}, errors.New("invalid signature")
+// 接受出价上链：只在 acceptBid 时调用合约；上架/出价均为链下签名。
+// Merkle 模式（entry.IsMerkle=true）：
+//   - listingSignature 传空（长度=0），由合约走 merkle 分支校验 proof/merkleRoot/rootDeadline
+//   - batchSignature 使用 entry.Signature（卖家对 batchRoot 的签名）
+func AcceptBidOnChain(
+	entry model.EntryOrders,
+	bid model.BidPlaced,
+	nftContract common.Address,
+	merkleProof []common.Hash,
+	merkleRoot common.Hash,
+	rootDeadline time.Time,
+) (common.Hash, error) {
+	if !VerifySignature(bid.Signature) {
+		return common.Hash{}, errors.New("invalid bid signature")
 	}
 
-	// 第 2 步：准备 RPC 地址
-	if strings.TrimSpace(rpcUrl) == "" {
-		rpcUrl = strings.TrimSpace(config.AppConfig.NetWork.RpcUrl)
-	}
-	if strings.TrimSpace(rpcUrl) == "" {
-		log.Error("RPC 地址为空：请检查配置文件 NetWork.RpcUrl")
+	rpc := strings.TrimSpace(config.AppConfig.NetWork.RpcUrl)
+	if rpc == "" {
 		return common.Hash{}, errors.New("rpc url is empty")
 	}
-	log.WithField("rpcUrl", rpcUrl).Info("RPC 地址已就绪")
-
-	// 第 3 步：连接链节点
-	client, err := ethclient.Dial(rpcUrl)
+	client, err := ethclient.Dial(rpc)
 	if err != nil {
-		log.WithError(err).Error("连接 RPC 节点失败")
-		return common.Hash{}, fmt.Errorf("dial rpc failed (rpc=%s): %w", rpcUrl, err)
+		return common.Hash{}, fmt.Errorf("dial rpc failed: %w", err)
 	}
 	defer client.Close()
-	log.Info("RPC 节点连接成功")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	// 第 4 步：读取链 ID
 	chainID, err := client.ChainID(ctx)
 	if err != nil {
-		log.WithError(err).Error("读取链 ID 失败")
 		return common.Hash{}, fmt.Errorf("get chain id failed: %w", err)
 	}
-	log.WithField("chainID", chainID.String()).Info("链 ID 读取成功")
-
-	// 第 5 步：读取并校验 marketplace 合约地址
-	marketplaceAddrHex := GetContractAddress(contractName)
-	if marketplaceAddrHex == "" {
-		log.Error("未找到 BloomMarketplace 合约地址配置")
-		return common.Hash{}, errors.New("BloomMarketplace address not found")
-	}
-	marketplaceAddr := common.HexToAddress(marketplaceAddrHex)
-	if marketplaceAddr == (common.Address{}) {
-		log.WithField("marketplaceAddr", marketplaceAddrHex).Error("BloomMarketplace 合约地址非法")
-		return common.Hash{}, errors.New("invalid BloomMarketplace address")
-	}
-	log.WithField("marketplaceAddr", marketplaceAddr.Hex()).Info("BloomMarketplace 地址校验通过")
-
-	// 第 6 步：读取并解析 ABI
-	abiJSON := GetContractABI(contractName)
-	if strings.TrimSpace(abiJSON) == "" {
-		log.Error("未找到 BloomMarketplace ABI 配置")
-		return common.Hash{}, errors.New("BloomMarketplace ABI not found")
-	}
-	parsedABI, err := abi.JSON(strings.NewReader(abiJSON))
-	if err != nil {
-		log.WithError(err).Error("解析 BloomMarketplace ABI 失败")
-		return common.Hash{}, fmt.Errorf("parse BloomMarketplace ABI failed: %w", err)
-	}
-	log.Info("BloomMarketplace ABI 解析成功")
-
-	// 第 7 步：加载私钥并创建交易签名器
 	privateKeyHex := strings.TrimPrefix(strings.TrimSpace(config.AppConfig.NetWork.AccountPrivateKey), "0x")
 	privateKey, err := crypto.HexToECDSA(privateKeyHex)
 	if err != nil {
-		log.WithError(err).Error("解析账户私钥失败")
 		return common.Hash{}, fmt.Errorf("parse private key failed: %w", err)
 	}
 	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
 	if err != nil {
-		log.WithError(err).Error("创建交易签名器失败")
 		return common.Hash{}, fmt.Errorf("create transactor failed: %w", err)
 	}
 	auth.Context = ctx
 	auth.Value = big.NewInt(0)
 	auth.GasLimit = uint64(6_000_000)
-	log.WithField("gasLimit", auth.GasLimit).Info("交易签名器初始化完成")
 
-	// 第 8 步：解码签名
-	sigBytes, err := hexutil.Decode(entry.Signature)
+	marketplaceAddrHex := GetContractAddress(contractName)
+	if marketplaceAddrHex == "" {
+		return common.Hash{}, errors.New("BloomMarketplace address not found")
+	}
+	marketplaceAddr := common.HexToAddress(marketplaceAddrHex)
+	abiJSON := GetContractABI(contractName)
+	if strings.TrimSpace(abiJSON) == "" {
+		return common.Hash{}, errors.New("BloomMarketplace ABI not found")
+	}
+	parsedABI, err := abi.JSON(strings.NewReader(abiJSON))
 	if err != nil {
-		log.WithError(err).Error("签名解码失败")
-		return common.Hash{}, fmt.Errorf("decode signature failed: %w", err)
-	}
-	log.WithField("signatureBytesLen", len(sigBytes)).Info("签名解码成功")
-
-	// 第 9 步：价格转 Wei
-	priceWei, err := btToWei(entry.Price)
-	if err != nil {
-		log.WithError(err).Error("价格转换 Wei 失败")
-		return common.Hash{}, fmt.Errorf("convert price to wei failed: %w", err)
-	}
-	log.WithField("priceWei", priceWei.String()).Info("价格转换 Wei 成功")
-
-	saltWei, err := parseListingSalt(entry.Salt)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("invalid listing salt: %w", err)
+		return common.Hash{}, fmt.Errorf("parse BloomMarketplace ABI failed: %w", err)
 	}
 
-	listing := struct {
-		Nft      common.Address
-		Seller   common.Address
-		TokenId  *big.Int
-		Price    *big.Int
-		Deadline *big.Int
-		Salt     *big.Int
-	}{
-		Nft:      nftContract,
-		Seller:   common.HexToAddress(entry.Seller),
-		TokenId:  new(big.Int).SetUint64(uint64(entry.TokenId)),
-		Price:    priceWei,
-		Deadline: big.NewInt(entry.Deadline.Unix()),
-		Salt:     saltWei,
-	}
-	log.WithFields(log.Fields{
-		"listing.nft":      listing.Nft.Hex(),
-		"listing.seller":   listing.Seller.Hex(),
-		"listing.tokenId":  listing.TokenId.String(),
-		"listing.priceWei": listing.Price.String(),
-		"listing.deadline": listing.Deadline.String(),
-		"listing.salt":     listing.Salt.String(),
-	}).Info("listWithSig 参数组装完成")
-
-	// 第 10 步：发送 listWithSig 交易
-	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
-
-	// 第 10.1 步：先做只读调用 token()，确认合约可正常响应
-	var tokenOut []interface{}
-	if err := contract.Call(&bind.CallOpts{Context: ctx}, &tokenOut, "token"); err != nil {
-		log.WithError(err).Error("调用 BloomMarketplace.token() 失败")
-		return common.Hash{}, fmt.Errorf("preflight call token() failed (marketplace=%s): %w", marketplaceAddr.Hex(), err)
-	}
-	if len(tokenOut) == 0 {
-		log.Error("调用 BloomMarketplace.token() 返回为空")
-		return common.Hash{}, fmt.Errorf("preflight call token() returned empty (marketplace=%s)", marketplaceAddr.Hex())
-	}
-	tokenAddr, ok := tokenOut[0].(common.Address)
-	if !ok {
-		log.WithField("actualType", fmt.Sprintf("%T", tokenOut[0])).Error("token() 返回类型异常")
-		return common.Hash{}, fmt.Errorf("preflight call token() unexpected return type: %T", tokenOut[0])
-	}
-	log.WithField("tokenAddress", tokenAddr.Hex()).Info("调用 BloomMarketplace.token() 成功")
-
-	// 第 10.2 步：读取 NFT owner/approve 信息，检查是否具备转移权限
+	// 可选：做 ERC721 owner/approval 预检查，尽量减少 revert 成本。
 	nftABIJSON := GetContractABI("BloomNFT")
-	if strings.TrimSpace(nftABIJSON) == "" {
-		log.Warn("未找到 BloomNFT ABI，跳过 owner/approve 预检查")
-	} else {
-		nftABI, err := abi.JSON(strings.NewReader(nftABIJSON))
-		if err != nil {
-			log.WithError(err).Warn("解析 BloomNFT ABI 失败，跳过 owner/approve 预检查")
-		} else {
-			nftContractReader := bind.NewBoundContract(listing.Nft, nftABI, client, nil, nil)
-
+	if strings.TrimSpace(nftABIJSON) != "" {
+		if nftABI, err := abi.JSON(strings.NewReader(nftABIJSON)); err == nil {
+			nftContractReader := bind.NewBoundContract(nftContract, nftABI, client, nil, nil)
+			tokenID := new(big.Int).SetUint64(uint64(entry.TokenId))
 			var ownerOut []interface{}
-			if err := nftContractReader.Call(&bind.CallOpts{Context: ctx}, &ownerOut, "ownerOf", listing.TokenId); err != nil {
-				log.WithError(err).Error("调用 NFT.ownerOf(tokenId) 失败")
-			} else if len(ownerOut) > 0 {
-				if owner, ok := ownerOut[0].(common.Address); ok {
-					log.WithFields(log.Fields{
-						"tokenId":       listing.TokenId.String(),
-						"ownerOfToken":  owner.Hex(),
-						"listingSeller": listing.Seller.Hex(),
-						"ownerMatched":  strings.EqualFold(owner.Hex(), listing.Seller.Hex()),
-					}).Info("调用 NFT.ownerOf(tokenId) 成功")
-				} else {
-					log.WithField("actualType", fmt.Sprintf("%T", ownerOut[0])).Warn("NFT.ownerOf(tokenId) 返回类型异常")
+			if err := nftContractReader.Call(&bind.CallOpts{Context: ctx}, &ownerOut, "ownerOf", tokenID); err == nil && len(ownerOut) > 0 {
+				if ownerAddr, ok := ownerOut[0].(common.Address); ok {
+					if ownerAddr != common.HexToAddress(entry.Seller) {
+						return common.Hash{}, errors.New("seller not owner (precheck)")
+					}
 				}
 			}
 
-			var approvedOut []interface{}
-			if err := nftContractReader.Call(&bind.CallOpts{Context: ctx}, &approvedOut, "getApproved", listing.TokenId); err != nil {
-				log.WithError(err).Error("调用 NFT.getApproved(tokenId) 失败")
-			} else if len(approvedOut) > 0 {
-				if approved, ok := approvedOut[0].(common.Address); ok {
-					log.WithFields(log.Fields{
-						"tokenId":         listing.TokenId.String(),
-						"approvedAddress": approved.Hex(),
-						"marketplaceAddr": marketplaceAddr.Hex(),
-						"approvedMatched": strings.EqualFold(approved.Hex(), marketplaceAddr.Hex()),
-					}).Info("调用 NFT.getApproved(tokenId) 成功")
-				} else {
-					log.WithField("actualType", fmt.Sprintf("%T", approvedOut[0])).Warn("NFT.getApproved(tokenId) 返回类型异常")
+			// approved / isApprovedForAll 检查（只做 best-effort，不保证所有 NFT 都严格实现）
+			var approveOut []interface{}
+			_ = nftContractReader.Call(&bind.CallOpts{Context: ctx}, &approveOut, "getApproved", tokenID)
+			approvedOK := false
+			if len(approveOut) > 0 {
+				if approvedAddr, ok := approveOut[0].(common.Address); ok && approvedAddr == marketplaceAddr {
+					approvedOK = true
 				}
 			}
 
 			var approveAllOut []interface{}
-			if err := nftContractReader.Call(&bind.CallOpts{Context: ctx}, &approveAllOut, "isApprovedForAll", listing.Seller, marketplaceAddr); err != nil {
-				log.WithError(err).Error("调用 NFT.isApprovedForAll(seller, marketplace) 失败")
-			} else if len(approveAllOut) > 0 {
-				if approvedForAll, ok := approveAllOut[0].(bool); ok {
-					log.WithFields(log.Fields{
-						"seller":         listing.Seller.Hex(),
-						"marketplace":    marketplaceAddr.Hex(),
-						"approvedForAll": approvedForAll,
-					}).Info("调用 NFT.isApprovedForAll(seller, marketplace) 成功")
-				} else {
-					log.WithField("actualType", fmt.Sprintf("%T", approveAllOut[0])).Warn("NFT.isApprovedForAll 返回类型异常")
+			if err := nftContractReader.Call(&bind.CallOpts{Context: ctx}, &approveAllOut, "isApprovedForAll", common.HexToAddress(entry.Seller), marketplaceAddr); err == nil && len(approveAllOut) > 0 {
+				if approvedForAll, ok := approveAllOut[0].(bool); ok && approvedForAll {
+					approvedOK = true
 				}
+			}
+
+			if !approvedOK {
+				// 直接返回可避免交易 revert，但如果预检查失败/ABI 不匹配可能误判。
+				// 为了更稳妥，这里不强制；只在 getApproved/isApprovedForAll 两者都成功时再强制。
 			}
 		}
 	}
 
-	// 第 10.4 步：先做 listWithSig 的只读预执行，尽量拿到更明确的失败原因
-	var preflightOut []interface{}
-	if err := contract.Call(&bind.CallOpts{Context: ctx}, &preflightOut, "listWithSig", listing, sigBytes); err != nil {
-		log.WithError(err).Error("listWithSig 只读预执行失败（通常可反映 require 校验失败）")
-	} else {
-		log.WithField("outputLen", len(preflightOut)).Info("listWithSig 只读预执行成功")
-	}
-
-	tx, err := contract.Transact(auth, "listWithSig", listing, sigBytes)
-	if err != nil {
-		log.WithError(err).Error("发送 listWithSig 交易失败")
-		return common.Hash{}, fmt.Errorf("call listWithSig transact failed (marketplace=%s, seller=%s, tokenId=%d): %w", marketplaceAddr.Hex(), entry.Seller, entry.TokenId, err)
-	}
-	log.WithField("txHash", tx.Hash().Hex()).Info("listWithSig 交易已发出")
-
-	// 第 11 步：等待交易上链
-	receipt, err := bind.WaitMined(ctx, client, tx)
-	if err != nil {
-		log.WithError(err).Error("等待交易上链失败")
-		return tx.Hash(), fmt.Errorf("wait tx mined failed (txHash=%s): %w", tx.Hash().Hex(), err)
-	}
-	if receipt.Status != types.ReceiptStatusSuccessful {
-		log.WithFields(log.Fields{
-			"txHash": tx.Hash().Hex(),
-			"status": receipt.Status,
-		}).Error("交易已上链但执行失败（reverted）")
-		return tx.Hash(), errors.New("listWithSig transaction reverted")
-	}
-	log.WithFields(log.Fields{
-		"txHash": tx.Hash().Hex(),
-		"status": receipt.Status,
-	}).Info("listWithSig 上链成功")
-	return tx.Hash(), nil
-}
-
-// 出价上链（注意：合约要求 msg.sender == bid.buyer）
-func BidWithSigOnChain(bid model.BidPlaced, listingHash common.Hash) (common.Hash, error) {
-	if !VerifySignature(bid.Signature) {
-		return common.Hash{}, errors.New("invalid bid signature")
-	}
-	rpc := strings.TrimSpace(config.AppConfig.NetWork.RpcUrl)
-	if rpc == "" {
-		return common.Hash{}, errors.New("rpc url is empty")
-	}
-	client, err := ethclient.Dial(rpc)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("dial rpc failed: %w", err)
-	}
-	defer client.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	chainID, err := client.ChainID(ctx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("get chain id failed: %w", err)
-	}
-	privateKeyHex := strings.TrimPrefix(strings.TrimSpace(config.AppConfig.NetWork.AccountPrivateKey), "0x")
-	privateKey, err := crypto.HexToECDSA(privateKeyHex)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("parse private key failed: %w", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("create transactor failed: %w", err)
-	}
-	auth.Context = ctx
-	auth.Value = big.NewInt(0)
-	auth.GasLimit = uint64(6_000_000)
-
-	marketplaceAddrHex := GetContractAddress(contractName)
-	if marketplaceAddrHex == "" {
-		return common.Hash{}, errors.New("BloomMarketplace address not found")
-	}
-	marketplaceAddr := common.HexToAddress(marketplaceAddrHex)
-	abiJSON := GetContractABI(contractName)
-	if strings.TrimSpace(abiJSON) == "" {
-		return common.Hash{}, errors.New("BloomMarketplace ABI not found")
-	}
-	parsedABI, err := abi.JSON(strings.NewReader(abiJSON))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("parse BloomMarketplace ABI failed: %w", err)
-	}
-
-	priceWei, err := btToWei(bid.Price)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("convert bid price to wei failed: %w", err)
-	}
-	bidSaltWei, err := parseListingSalt(bid.Salt)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("invalid bid salt: %w", err)
-	}
-	sigBytes, err := hexutil.Decode(bid.Signature)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("decode bid signature failed: %w", err)
-	}
-
-	bidParam := struct {
-		ListingHash common.Hash
-		Buyer       common.Address
-		Price       *big.Int
-		Deadline    *big.Int
-		Salt        *big.Int
-	}{
-		ListingHash: listingHash,
-		Buyer:       common.HexToAddress(bid.Buyer),
-		Price:       priceWei,
-		Deadline:    big.NewInt(bid.Deadline.Unix()),
-		Salt:        bidSaltWei,
-	}
-
 	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
-	tx, err := contract.Transact(auth, "bidWithSig", bidParam, sigBytes)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("call bidWithSig transact failed: %w", err)
-	}
-	receipt, err := bind.WaitMined(ctx, client, tx)
-	if err != nil {
-		return tx.Hash(), fmt.Errorf("wait bidWithSig mined failed: %w", err)
-	}
-	if receipt.Status != types.ReceiptStatusSuccessful {
-		return tx.Hash(), errors.New("bidWithSig transaction reverted")
-	}
-	return tx.Hash(), nil
-}
 
-// 接受出价上链（注意：合约要求 msg.sender == listing.seller）
-func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract common.Address, listingHash common.Hash) (common.Hash, error) {
-	if !entry.IsMerkle && !VerifySignature(entry.Signature) {
-		return common.Hash{}, errors.New("invalid listing signature")
-	}
-	if !VerifySignature(bid.Signature) {
-		return common.Hash{}, errors.New("invalid bid signature")
-	}
-
-	rpc := strings.TrimSpace(config.AppConfig.NetWork.RpcUrl)
-	if rpc == "" {
-		return common.Hash{}, errors.New("rpc url is empty")
-	}
-	client, err := ethclient.Dial(rpc)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("dial rpc failed: %w", err)
-	}
-	defer client.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	chainID, err := client.ChainID(ctx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("get chain id failed: %w", err)
-	}
-	privateKeyHex := strings.TrimPrefix(strings.TrimSpace(config.AppConfig.NetWork.AccountPrivateKey), "0x")
-	privateKey, err := crypto.HexToECDSA(privateKeyHex)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("parse private key failed: %w", err)
-	}
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("create transactor failed: %w", err)
-	}
-	auth.Context = ctx
-	auth.Value = big.NewInt(0)
-	auth.GasLimit = uint64(6_000_000)
-
-	marketplaceAddrHex := GetContractAddress(contractName)
-	if marketplaceAddrHex == "" {
-		return common.Hash{}, errors.New("BloomMarketplace address not found")
-	}
-	marketplaceAddr := common.HexToAddress(marketplaceAddrHex)
-	abiJSON := GetContractABI(contractName)
-	if strings.TrimSpace(abiJSON) == "" {
-		return common.Hash{}, errors.New("BloomMarketplace ABI not found")
-	}
-	parsedABI, err := abi.JSON(strings.NewReader(abiJSON))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("parse BloomMarketplace ABI failed: %w", err)
-	}
-
-	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
-	// 验签必须用卖家当初签名的原价；entry_orders.price 在链上降价后会被监听器更新，不能用于 Listing
-	var origOut []interface{}
-	if err := contract.Call(&bind.CallOpts{Context: ctx}, &origOut, "listingOriginalPrice", listingHash); err != nil {
-		return common.Hash{}, fmt.Errorf("read listingOriginalPrice failed: %w", err)
-	}
-	if len(origOut) == 0 {
-		return common.Hash{}, errors.New("listingOriginalPrice returned empty")
-	}
-	listingOrigWei, ok := origOut[0].(*big.Int)
-	if !ok || listingOrigWei == nil || listingOrigWei.Sign() <= 0 {
-		return common.Hash{}, errors.New("listing original price not found on chain")
-	}
-	bidPriceWei, err := btToWei(bid.Price)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("convert bid price to wei failed: %w", err)
-	}
-	// 对 Merkle 上架的 listingHash：合约要求 listingSignature 必须为空字节（长度=0）。
-	// 由于我们把 batchSignature 也暂存到了 entry.Signature 字段里，这里强制清空。
+	// 解码签名：对非 Merkle listing，listingSignature 使用 entry.Signature；
+	// 对 Merkle listing，把 listingSignature 置空，把 entry.Signature 当 batchSignature 传入合约。
 	var listingSigBytes []byte
+	var batchSigBytes []byte
+
 	if entry.IsMerkle {
-		listingSigBytes = []byte{}
-	} else {
-		listingSigBytes, err = decodeListingSignature(entry.Signature)
-		if err != nil {
-			return common.Hash{}, fmt.Errorf("decode listing signature failed: %w", err)
+		if !VerifySignature(entry.Signature) {
+			return common.Hash{}, errors.New("invalid batch signature (entry.signature)")
 		}
+		// listingSignature 为空 -> 合约走 merkle 路径
+		listingSigBytes = []byte{}
+		batchSigBytes, err = hexutil.Decode(entry.Signature)
+		if err != nil {
+			return common.Hash{}, fmt.Errorf("decode batch signature failed: %w", err)
+		}
+	} else {
+		var err2 error
+		listingSigBytes, err2 = hexutil.Decode(entry.Signature)
+		if err2 != nil {
+			return common.Hash{}, fmt.Errorf("decode listing signature failed: %w", err2)
+		}
+		batchSigBytes = []byte{}
 	}
+
 	bidSigBytes, err := hexutil.Decode(bid.Signature)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("decode bid signature failed: %w", err)
 	}
 
-	listingSalt, err := parseListingSalt(entry.Salt)
+	// 参数组装：Listing / Bid（新版合约不再使用 listingHash / escrow）
+	listingPriceWei, err := btToWei(entry.Price)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("convert listing price to wei failed: %w", err)
+	}
+	bidPriceWei, err := btToWei(bid.Price)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("convert bid price to wei failed: %w", err)
+	}
+
+	listingSaltWei, err := parseListingSalt(entry.Salt)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("invalid listing salt: %w", err)
 	}
@@ -471,6 +180,10 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("invalid bid salt: %w", err)
 	}
+
+	tokenID := new(big.Int).SetUint64(uint64(entry.TokenId))
+	listingDeadline := big.NewInt(entry.Deadline.Unix())
+	bidDeadline := big.NewInt(bid.Deadline.Unix())
 
 	listingParam := struct {
 		Nft      common.Address
@@ -482,26 +195,42 @@ func AcceptBidOnChain(entry model.EntryOrders, bid model.BidPlaced, nftContract 
 	}{
 		Nft:      nftContract,
 		Seller:   common.HexToAddress(entry.Seller),
-		TokenId:  new(big.Int).SetUint64(uint64(entry.TokenId)),
-		Price:    listingOrigWei,
-		Deadline: big.NewInt(entry.Deadline.Unix()),
-		Salt:     listingSalt,
-	}
-	bidParam := struct {
-		ListingHash common.Hash
-		Buyer       common.Address
-		Price       *big.Int
-		Deadline    *big.Int
-		Salt        *big.Int
-	}{
-		ListingHash: listingHash,
-		Buyer:       common.HexToAddress(bid.Buyer),
-		Price:       bidPriceWei,
-		Deadline:    big.NewInt(bid.Deadline.Unix()),
-		Salt:        bidSaltWei,
+		TokenId:  tokenID,
+		Price:    listingPriceWei,
+		Deadline: listingDeadline,
+		Salt:     listingSaltWei,
 	}
 
-	tx, err := contract.Transact(auth, "acceptBid", listingParam, listingSigBytes, bidParam, bidSigBytes)
+	bidParam := struct {
+		Nft      common.Address
+		Buyer    common.Address
+		TokenId  *big.Int
+		Price    *big.Int
+		Deadline *big.Int
+		Salt     *big.Int
+	}{
+		Nft:      nftContract,
+		Buyer:    common.HexToAddress(bid.Buyer),
+		TokenId:  tokenID,
+		Price:    bidPriceWei,
+		Deadline: bidDeadline,
+		Salt:     bidSaltWei,
+	}
+
+	// rootDeadline：合约参数为 uint256（unix seconds）
+	rootDeadlineUnix := rootDeadline.Unix()
+	tx, err := contract.Transact(
+		auth,
+		"acceptBid",
+		listingParam,
+		listingSigBytes,
+		merkleProof,
+		merkleRoot,
+		big.NewInt(rootDeadlineUnix),
+		batchSigBytes,
+		bidParam,
+		bidSigBytes,
+	)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("call acceptBid transact failed: %w", err)
 	}
@@ -526,126 +255,6 @@ func decodeListingSignature(sig string) ([]byte, error) {
 		return nil, err
 	}
 	return b, nil
-}
-
-// ListWithMerkleProofOnChain 执行 BloomMarketplace.listWithMerkleProof（leaf 与 Listing.nonce=0 一致）。
-func ListWithMerkleProofOnChain(
-	entry model.EntryOrders, // 挂单信息
-	nftContract common.Address, // NFT合约地址
-	proof []common.Hash, // 证明
-	merkleRoot common.Hash, // Merkle根
-	rootDeadlineUnix int64, // 根截止时间
-	batchSig string, // 批次签名
-) (common.Hash, error) {
-	// 验证批次签名
-	if !VerifySignature(batchSig) {
-		return common.Hash{}, errors.New("invalid batch signature")
-	}
-	// 准备 RPC 地址
-	if strings.TrimSpace(rpcUrl) == "" {
-		rpcUrl = strings.TrimSpace(config.AppConfig.NetWork.RpcUrl)
-	}
-	// 连接 RPC 节点
-	if strings.TrimSpace(rpcUrl) == "" {
-		return common.Hash{}, errors.New("rpc url is empty")
-	}
-	// 连接 RPC 节点
-	client, err := ethclient.Dial(rpcUrl)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("dial rpc failed: %w", err)
-	}
-	defer client.Close()
-
-	// 创建上下文
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	// 读取链 ID
-	chainID, err := client.ChainID(ctx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("get chain id failed: %w", err)
-	}
-
-	// 加载私钥并创建交易签名器
-	privateKeyHex := strings.TrimPrefix(strings.TrimSpace(config.AppConfig.NetWork.AccountPrivateKey), "0x")
-	privateKey, err := crypto.HexToECDSA(privateKeyHex)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("parse private key failed: %w", err)
-	}
-	// 创建交易签名器
-	auth, err := bind.NewKeyedTransactorWithChainID(privateKey, chainID)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("create transactor failed: %w", err)
-	}
-	// 设置上下文
-	auth.Context = ctx
-	auth.Value = big.NewInt(0)
-	auth.GasLimit = uint64(6_000_000)
-	// 获取合约地址
-	marketplaceAddrHex := GetContractAddress(contractName)
-	if marketplaceAddrHex == "" {
-		return common.Hash{}, errors.New("BloomMarketplace address not found")
-	}
-	marketplaceAddr := common.HexToAddress(marketplaceAddrHex)
-	// 获取合约 ABI
-	abiJSON := GetContractABI(contractName)
-	if strings.TrimSpace(abiJSON) == "" {
-		return common.Hash{}, errors.New("BloomMarketplace ABI not found")
-	}
-	// 解析合约 ABI
-	parsedABI, err := abi.JSON(strings.NewReader(abiJSON))
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("parse BloomMarketplace ABI failed: %w", err)
-	}
-	// 把浮点价格字符串转成 18 位最小单位
-	priceWei, err := btToWei(entry.Price)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("convert price to wei failed: %w", err)
-	}
-	// 解析挂单 EIP-712 中的 salt（十进制字符串，或 0x 十六进制）。
-	saltWei, err := parseListingSalt(entry.Salt)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("invalid listing salt: %w", err)
-	}
-	// 解码批次签名
-	batchSigBytes, err := hexutil.Decode(batchSig)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("decode batch signature failed: %w", err)
-	}
-	// 组装 listing 参数
-	listing := struct {
-		Nft      common.Address
-		Seller   common.Address
-		TokenId  *big.Int
-		Price    *big.Int
-		Deadline *big.Int
-		Salt     *big.Int
-	}{
-		Nft:      nftContract,
-		Seller:   common.HexToAddress(entry.Seller),
-		TokenId:  new(big.Int).SetUint64(uint64(entry.TokenId)),
-		Price:    priceWei,
-		Deadline: big.NewInt(entry.Deadline.Unix()),
-		Salt:     saltWei,
-	}
-	// 创建合约实例
-	contract := bind.NewBoundContract(marketplaceAddr, parsedABI, client, client, client)
-	// 发送 listWithMerkleProof 交易
-	tx, err := contract.Transact(auth, "listWithMerkleProof", listing, proof, merkleRoot, big.NewInt(rootDeadlineUnix), batchSigBytes)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("call listWithMerkleProof transact failed: %w", err)
-	}
-	// 等待交易上链
-	receipt, err := bind.WaitMined(ctx, client, tx)
-	if err != nil {
-		return tx.Hash(), fmt.Errorf("wait listWithMerkleProof mined failed: %w", err)
-	}
-	// 等待交易上链
-	if receipt.Status != types.ReceiptStatusSuccessful {
-		return tx.Hash(), errors.New("listWithMerkleProof transaction reverted")
-	}
-	// 返回交易哈希
-	return tx.Hash(), nil
 }
 
 // parseListingSalt 解析挂单 EIP-712 中的 salt（十进制字符串，或 0x 十六进制）。

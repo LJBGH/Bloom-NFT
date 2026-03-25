@@ -38,6 +38,32 @@ func GetContractAddress(contractName string) string {
 // ../abi/...json 文件中获取
 // 传入合约名称，返回合约ABI
 func GetContractABI(contractName string) string {
+	// 优先使用 hardhat artifacts 中的 ABI，避免后端旧 abi/ 文件与合约不同步。
+	// 当前项目里新合约主要更新在 BloomMarketplace。
+	if contractName == "BloomMarketplace" {
+		// 运行目录通常是 bln-backend；所以相对路径使用 ../bln-contracts。
+		artifactPath := filepath.Join("..", "bln-contracts", "artifacts", "contracts", "BloomMarketplace.sol", "BloomMarketplace.json")
+		if b, err := os.ReadFile(artifactPath); err == nil {
+			var wrap struct {
+				ABI json.RawMessage `json:"abi"`
+			}
+			if err := json.Unmarshal(b, &wrap); err == nil && len(wrap.ABI) > 0 {
+				return string(wrap.ABI)
+			}
+		}
+
+		// 兜底：再尝试一层目录（防止运行目录不是 bln-backend）。
+		artifactPath2 := filepath.Join("..", "..", "bln-contracts", "artifacts", "contracts", "BloomMarketplace.sol", "BloomMarketplace.json")
+		if b, err := os.ReadFile(artifactPath2); err == nil {
+			var wrap struct {
+				ABI json.RawMessage `json:"abi"`
+			}
+			if err := json.Unmarshal(b, &wrap); err == nil && len(wrap.ABI) > 0 {
+				return string(wrap.ABI)
+			}
+		}
+	}
+
 	b, err := readFileWithFallback(filepath.Join("abi", contractName+".json"))
 	if err != nil {
 		return ""

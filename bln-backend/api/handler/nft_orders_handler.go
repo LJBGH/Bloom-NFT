@@ -34,13 +34,13 @@ func NewNftOrdersHandler(nftOrdersService *services.NftOrdersService) *NftOrders
 // @Success      200      {object} map[string]interface{}
 // @Failure      400      {object} map[string]interface{}
 // @Router       /order/entryorders [post]
-func (n *NftOrdersHandler) EntryOrders(c *gin.Context) {
+func (n *NftOrdersHandler) OrdersEntry(c *gin.Context) {
 	var request request.EntryOrdersRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
 
-	txHash, err := n.NftOrdersService.EntryOrders(&request)
+	txHash, err := n.NftOrdersService.OrdersEntry(&request)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
@@ -50,12 +50,12 @@ func (n *NftOrdersHandler) EntryOrders(c *gin.Context) {
 
 // EntryOrdersBatch Merkle 批量上架
 // @Router /order/entryorders/batch [post]
-func (n *NftOrdersHandler) EntryOrdersBatch(c *gin.Context) {
+func (n *NftOrdersHandler) OrdersEntryBatch(c *gin.Context) {
 	var req request.BatchEntryOrdersRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
-	txHashes, err := n.NftOrdersService.EntryOrdersBatch(&req)
+	txHashes, err := n.NftOrdersService.OrdersEntryBatch(&req)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
@@ -72,13 +72,13 @@ func (n *NftOrdersHandler) EntryOrdersBatch(c *gin.Context) {
 // @Success      200      {object} map[string]interface{}
 // @Failure      400      {object} map[string]interface{}
 // @Router       /order/bidplaced [post]
-func (n *NftOrdersHandler) BidPlaced(c *gin.Context) {
+func (n *NftOrdersHandler) OrdersBid(c *gin.Context) {
 	var request request.BidPlacedRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
 
-	txHash, err := n.NftOrdersService.BidPlaced(&request)
+	txHash, err := n.NftOrdersService.OrdersBid(&request)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
@@ -96,13 +96,13 @@ func (n *NftOrdersHandler) BidPlaced(c *gin.Context) {
 // @Success      200      {object} map[string]interface{}
 // @Failure      400      {object} map[string]interface{}
 // @Router       /order/bidaccepted [post]
-func (n *NftOrdersHandler) BidAccepted(c *gin.Context) {
+func (n *NftOrdersHandler) OrdersBidAccepted(c *gin.Context) {
 	var request request.BidAcceptedRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
 
-	txHash, err := n.NftOrdersService.BidAccepted(&request)
+	txHash, err := n.NftOrdersService.OrdersBidAccepted(&request)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
@@ -120,7 +120,7 @@ func (n *NftOrdersHandler) BidAccepted(c *gin.Context) {
 // @Success      200    {object} map[string]interface{}
 // @Failure      400    {object} map[string]interface{}
 // @Router       /order/orderlist [get]
-func (n *NftOrdersHandler) GetEntryOrdersList(c *gin.Context) {
+func (n *NftOrdersHandler) GetOrdersEntryList(c *gin.Context) {
 	nftId := c.Param("nftId")
 	if nftId == "" {
 		// 支持无 path 参数时，用 query 过滤
@@ -151,7 +151,7 @@ func (n *NftOrdersHandler) GetEntryOrdersList(c *gin.Context) {
 		statusPtr = &tmp
 	}
 
-	respList, err := n.NftOrdersService.GetEntryOrdersList(nftIdPtr, statusPtr)
+	respList, err := n.NftOrdersService.GetOrdersEntryList(nftIdPtr, statusPtr)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
@@ -169,13 +169,13 @@ func (n *NftOrdersHandler) GetEntryOrdersList(c *gin.Context) {
 // @Success      200       {object} map[string]interface{}
 // @Failure      400       {object} map[string]interface{}
 // @Router       /order/bidlist/{ordersId} [get]
-func (n *NftOrdersHandler) GetBidPlacedList(c *gin.Context) {
+func (n *NftOrdersHandler) GetOrdersBidList(c *gin.Context) {
 	ordersId := c.Param("ordersId")
 	ordersIdParsed, err := strconv.ParseUint(ordersId, 10, 0)
 	if err != nil {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
-	list, err := n.NftOrdersService.GetBidPlacedList(uint(ordersIdParsed))
+	list, err := n.NftOrdersService.GetOrdersBidList(uint(ordersIdParsed))
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
@@ -185,7 +185,7 @@ func (n *NftOrdersHandler) GetBidPlacedList(c *gin.Context) {
 
 // GetBidPlacedListForSellerNftList 卖家查询某 NFT 列表项（nft_list_id）对应挂单上的出价列表
 // Query: nftListId, seller（必填；后端校验该卖家拥有该 nft_list 下的挂单）
-func (n *NftOrdersHandler) GetBidPlacedListForSellerNftList(c *gin.Context) {
+func (n *NftOrdersHandler) GetOrdersBidListForSellerNftList(c *gin.Context) {
 	nftListIdStr := c.Query("nftListId")
 	seller := c.Query("seller")
 	if nftListIdStr == "" || seller == "" {
@@ -196,7 +196,7 @@ func (n *NftOrdersHandler) GetBidPlacedListForSellerNftList(c *gin.Context) {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
 
-	list, err := n.NftOrdersService.GetBidPlacedListForSellerNftList(uint(nftListIdParsed), seller)
+	list, err := n.NftOrdersService.GetOrdersBidListForSellerNftList(uint(nftListIdParsed), seller)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
@@ -208,12 +208,12 @@ func (n *NftOrdersHandler) GetBidPlacedListForSellerNftList(c *gin.Context) {
 }
 
 // GetMyEntryOrders 当前用户作为卖家的挂单历史（query: seller 必填）
-func (n *NftOrdersHandler) GetMyEntryOrders(c *gin.Context) {
+func (n *NftOrdersHandler) GetMyOrdersEntry(c *gin.Context) {
 	seller := c.Query("seller")
 	if seller == "" {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
-	list, err := n.NftOrdersService.GetMyEntryOrdersBySeller(seller)
+	list, err := n.NftOrdersService.GetMyOrdersEntryBySeller(seller)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}
@@ -221,12 +221,12 @@ func (n *NftOrdersHandler) GetMyEntryOrders(c *gin.Context) {
 }
 
 // GetMyBidHistory 当前用户作为买家的出价历史（query: buyer 必填）
-func (n *NftOrdersHandler) GetMyBidHistory(c *gin.Context) {
+func (n *NftOrdersHandler) GetMyOrdersBidHistory(c *gin.Context) {
 	buyer := c.Query("buyer")
 	if buyer == "" {
 		panic(&middleware.BusinessError{ResposeCode: enums.INVALID_PARAMETERS})
 	}
-	list, err := n.NftOrdersService.GetMyBidHistoryByBuyer(buyer)
+	list, err := n.NftOrdersService.GetMyOrdersBidHistoryByBuyer(buyer)
 	if err != nil {
 		panic(middleware.NewBusinessError(enums.FAILED, err))
 	}

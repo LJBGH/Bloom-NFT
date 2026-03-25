@@ -28,7 +28,7 @@ func (n *NftListRepository) GetListByNftId(nftId uint) ([]NftListWithEntryOrders
 	// 关联查询 entry_orders表，获取订单状态
 
 	var nftListWithEntryOrders []NftListWithEntryOrders
-	query := n.DB.Where(&model.NftList{NftID: nftId}).Joins("LEFT JOIN entry_orders ON entry_orders.nft_list_id = nft_list.id")
+	query := n.DB.Where(&model.NftList{NftID: nftId}).Joins("LEFT JOIN orders_entry ON orders_entry.nft_list_id = nft_list.id")
 	if err := query.Find(&nftListWithEntryOrders).Error; err != nil {
 		return nil, err
 	}

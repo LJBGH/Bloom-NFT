@@ -17,6 +17,7 @@ export default defineConfig({
             // runs 较低有利于减小部署体积；若更在意运行时 gas 可提高到 200～1000
             runs: 200,
           },
+          viaIR: true,
         },
       },
       production: {
@@ -26,6 +27,7 @@ export default defineConfig({
             enabled: true,
             runs: 200,
           },
+          viaIR: true,
         },
       },
     },

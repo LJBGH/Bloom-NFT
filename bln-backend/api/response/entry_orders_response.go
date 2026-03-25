@@ -20,9 +20,15 @@ type EntryOrdersResponse struct {
 	TxHash     string       `json:"txHash" gorm:"type:varchar(256)"`         // 交易哈希
 	Signature  string       `json:"signature" gorm:"type:varchar(256)"`      // listing 签名（用于前端直连 buy）
 	IsMerkle   bool         `json:"isMerkle"`                                // Merkle 批量上架：购买时无需 listing 单笔签名
+
+	// Merkle 信息：仅当 IsMerkle=true 时参与合约购买（buy / buyBatch 的 merkle 路径）。
+	MerkleRoot      string   `json:"merkleRoot" gorm:"type:varchar(66)"`           // bytes32 hex
+	RootDeadlineSec uint64   `json:"rootDeadlineSec" gorm:"type:bigint unsigned"` // uint256 unix seconds
+	MerkleProof     []string `json:"merkleProof" gorm:"-"`                       // []bytes32 hex
+
 	CreateTime time.Time    `json:"createTime" gorm:"type:datetime; not null"`
 	UpdateTime time.Time    `json:"updateTime" gorm:"type:datetime; not null"`
 	ImageUrl   string       `json:"imageUrl" gorm:"type:varchar(512);not null"` // NFT图片URL
-	// ListingHash 链上 listing 的 EIP-712 hash（上架事件后写入 chain_ref_entry_order；未上链时为空）
+	// ListingHash 是合约的 EIP-712 digest（由 entry_orders 的 listing 参数确定；在创建时写入）
 	ListingHash string `json:"listingHash"`
 }

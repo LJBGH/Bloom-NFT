@@ -64,16 +64,16 @@ func SetupRouter(
 		api.GET("/nft/user/categories", nftHander.UserCategories) // 获取用户拥有的 NFT 类目列表
 		api.GET("/nft/user/list/:nftId", nftHander.UserNftList)   // 获取用户在该 NFT 类目下的所有 NFT 列表
 
-		api.GET("/order/orderlist/:nftId", nftOrdersHandler.GetEntryOrdersList)                 //挂单列表
-		api.GET("/order/orderlist", nftOrdersHandler.GetEntryOrdersList)                        //挂单列表（nftId 可选）
-		api.GET("/order/bidlist-for-seller", nftOrdersHandler.GetBidPlacedListForSellerNftList) // 卖家按 nft_list_id 查出价
-		api.GET("/order/my-entryorders", nftOrdersHandler.GetMyEntryOrders)                     // 我的挂单历史
-		api.GET("/order/my-bids", nftOrdersHandler.GetMyBidHistory)                             // 我的出价历史
-		api.GET("/order/bidlist/:ordersId", nftOrdersHandler.GetBidPlacedList)                  //出价列表
-		api.POST("/order/entryorders", nftOrdersHandler.EntryOrders)                            // 挂单
-		api.POST("/order/entryorders/batch", nftOrdersHandler.EntryOrdersBatch)                 // Merkle 批量挂单
-		api.POST("/order/bidplaced", nftOrdersHandler.BidPlaced)                                // 出价
-		api.POST("/order/bidaccepted", nftOrdersHandler.BidAccepted)                            // 接受出价
+		api.GET("/order/orderlist/:nftId", nftOrdersHandler.GetOrdersEntryList)                 //挂单列表
+		api.GET("/order/orderlist", nftOrdersHandler.GetOrdersEntryList)                        //挂单列表（nftId 可选）
+		api.GET("/order/bidlist-for-seller", nftOrdersHandler.GetOrdersBidListForSellerNftList) // 卖家按 nft_list_id 查出价
+		api.GET("/order/my-entryorders", nftOrdersHandler.GetMyOrdersEntry)                     // 我的挂单历史
+		api.GET("/order/my-bids", nftOrdersHandler.GetMyOrdersBidHistory)                             // 我的出价历史
+		api.GET("/order/bidlist/:ordersId", nftOrdersHandler.GetOrdersBidList)                  //出价列表
+		api.POST("/order/entryorders", nftOrdersHandler.OrdersEntry)                            // 挂单
+		api.POST("/order/entryorders/batch", nftOrdersHandler.OrdersEntryBatch)                 // Merkle 批量挂单
+		api.POST("/order/bidplaced", nftOrdersHandler.OrdersBid)                                // 出价
+		api.POST("/order/bidaccepted", nftOrdersHandler.OrdersBidAccepted)                            // 接受出价
 	}
 	return r
 }

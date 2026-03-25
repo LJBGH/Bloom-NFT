@@ -21,7 +21,6 @@ export function TokenOwnerTool() {
   const [feeSuccess, setFeeSuccess] = useState<string | null>(null);
   const [marketplaceOwner, setMarketplaceOwner] = useState<string | null>(null);
   const [mpBtBalance, setMpBtBalance] = useState<string | null>(null);
-  const [bidEscrowTotal, setBidEscrowTotal] = useState<string | null>(null);
   const [withdrawableFees, setWithdrawableFees] = useState<string | null>(null);
   /** 可提手续费 wei，用于判断是否大于 0 */
   const [withdrawableWei, setWithdrawableWei] = useState<bigint | null>(null);
@@ -61,7 +60,6 @@ export function TokenOwnerTool() {
     if (chainId == null) {
       setMarketplaceOwner(null);
       setMpBtBalance(null);
-      setBidEscrowTotal(null);
       setWithdrawableFees(null);
       setWithdrawableWei(null);
       return;
@@ -70,7 +68,6 @@ export function TokenOwnerTool() {
     if (!reader) {
       setMarketplaceOwner(null);
       setMpBtBalance(null);
-      setBidEscrowTotal(null);
       setWithdrawableFees(null);
       setWithdrawableWei(null);
       return;
@@ -81,24 +78,20 @@ export function TokenOwnerTool() {
       const mp = getBloomMarketplaceContract(reader, chainId);
       const mpAddr = getBloomMarketplaceAddress(chainId);
       const token = getBloomTokenContract(reader, chainId);
-      const [own, bal, escrow] = await Promise.all([
+      // 合约当前不再托管用户出价，因此这里不再查询 escrow，只读取合约自身 token 余额。
+      const [own, bal] = await Promise.all([
         mp.owner() as Promise<string>,
-        token.balanceOf(mpAddr) as Promise<bigint>,
-        mp.totalBidEscrow() as Promise<bigint>,
+        token.balanceOf(mpAddr) as Promise<bigint>
       ]);
       setMarketplaceOwner(own);
       setMpBtBalance(formatUnits(bal, 18));
-      setBidEscrowTotal(formatUnits(escrow, 18));
-      const w = bal - escrow;
-      const ww = w > 0n ? w : 0n;
-      setWithdrawableWei(ww);
-      setWithdrawableFees(formatUnits(ww, 18));
+      setWithdrawableWei(bal);
+      setWithdrawableFees(formatUnits(bal, 18));
     } catch (e: unknown) {
       const err = e as { message?: string };
       setFeeError(err?.message || "读取市场合约数据失败");
       setMarketplaceOwner(null);
       setMpBtBalance(null);
-      setBidEscrowTotal(null);
       setWithdrawableFees(null);
       setWithdrawableWei(null);
     } finally {
@@ -158,7 +151,7 @@ export function TokenOwnerTool() {
           </Alert>
         )}
         <Typography variant="body2" color="text.secondary">
-          从 BloomMarketplace 合约提取累计交易手续费（BT）。合约内余额需扣除买家出价托管部分后，剩余方可提取；仅合约 owner 可调用链上{" "}
+          从 BloomMarketplace 合约提取累计交易手续费（BT）。合约当前不再托管用户出价，余额可直接提取；仅合约 owner 可调用链上{" "}
           <code>withdrawFees</code>。
         </Typography>
         {feeLoading && !mpBtBalance ? (
@@ -171,9 +164,6 @@ export function TokenOwnerTool() {
             </Typography>
             <Typography variant="body2">
               市场合约 BT 余额：{mpBtBalance ?? "—"} BT
-            </Typography>
-            <Typography variant="body2">
-              其中托管（出价锁定）：{bidEscrowTotal ?? "—"} BT
             </Typography>
             <Typography variant="body2" sx={{ fontWeight: 600 }}>
               可提取手续费：{withdrawableFees ?? "—"} BT

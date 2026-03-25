@@ -217,22 +217,12 @@ func (l *MarketplaceListener) handleLog(vLog types.Log) error {
 
 	// 按事件类型分发到对应业务处理函数。
 	switch ev.Name {
-	case "Listed":
-		err = l.onListed(vLog, ev) // 上架事件
-	case "ListingCancelled":
-		err = l.onListingCancelled(vLog) // 取消上架事件
+	case "OrderCancelled":
+		err = l.onOrderCancelled(vLog, ev) // 取消上架/撤回出价事件（取决于 isListing）
 	case "Buy":
 		err = l.onBuy(vLog) // 购买事件
-	case "BidPlaced":
-		err = l.onBidPlaced(vLog, ev) // 出价事件
-	case "BidCancelled":
-		err = l.onBidCancelled(vLog) // 撤回出价事件
 	case "BidAccepted":
 		err = l.onBidAccepted(vLog) // 接受出价事件
-	case "BidRefunded":
-		err = l.onBidRefunded(vLog) // 未中标出价退款完成事件
-	case "ListingPriceReduced":
-		err = l.onListingPriceReduced(vLog, ev) // 卖家链上降价
 	default:
 		return nil
 	}
@@ -244,95 +234,6 @@ func (l *MarketplaceListener) handleLog(vLog types.Log) error {
 	return l.insertEventLog(vLog, ev.Name)
 }
 
-// onListed 处理上架事件。
-func (l *MarketplaceListener) onListed(vLog types.Log, ev *abi.Event) error {
-	if len(vLog.Topics) < 4 {
-		return errors.New("invalid Listed topics")
-	}
-
-	var data struct {
-		TokenId  *big.Int
-		Price    *big.Int
-		Deadline *big.Int
-		Salt     *big.Int
-	}
-
-	// 解析事件数据。
-	if err := l.abiObj.UnpackIntoInterface(&data, ev.Name, vLog.Data); err != nil {
-		return fmt.Errorf("unpack Listed failed: %w", err)
-	}
-
-	// 获取 listingHash。
-	listingHash := vLog.Topics[1].Hex()
-	seller := common.HexToAddress(vLog.Topics[3].Hex()).Hex()
-	tokenID := data.TokenId.Uint64()
-
-	// 查询订单。
-	var order model.EntryOrders
-	err := l.db.Where(
-		"seller = ? AND token_id = ? AND salt = ?",
-		strings.ToLower(seller), tokenID, data.Salt.String(),
-	).Order("id DESC").First(&order).Error
-	if err != nil {
-		return fmt.Errorf("find entry_orders for Listed failed: %w", err)
-	}
-
-	// 更新订单状态。
-	now := time.Now()
-	if err := l.db.Model(&model.EntryOrders{}).Where("id = ?", order.ID).Updates(map[string]any{
-		"status":      enums.ListingPending,
-		"tx_hash":     vLog.TxHash.Hex(),
-		"update_time": now,
-	}).Error; err != nil {
-		return fmt.Errorf("update entry_orders on Listed failed: %w", err)
-	}
-
-	// 插入链上映射。
-	ref := model.ChainRefEntryOrder{
-		EntryOrderID: order.ID,
-		ListingHash:  strings.ToLower(listingHash),
-		CreateTime:   now,
-		UpdateTime:   now,
-	}
-	// 插入链上映射。
-	if err := l.db.Where("listing_hash = ?", ref.ListingHash).Assign(ref).FirstOrCreate(&ref).Error; err != nil {
-		return fmt.Errorf("upsert chain_ref_entry_order failed: %w", err)
-	}
-
-	return nil
-}
-
-// onListingPriceReduced 处理链上降价事件：同步 entry_orders.price。
-func (l *MarketplaceListener) onListingPriceReduced(vLog types.Log, ev *abi.Event) error {
-	if len(vLog.Topics) < 3 {
-		return errors.New("invalid ListingPriceReduced topics")
-	}
-	listingHash := strings.ToLower(vLog.Topics[1].Hex())
-
-	var data struct {
-		NewPrice *big.Int
-	}
-	if err := l.abiObj.UnpackIntoInterface(&data, ev.Name, vLog.Data); err != nil {
-		return fmt.Errorf("unpack ListingPriceReduced failed: %w", err)
-	}
-	if data.NewPrice == nil {
-		return errors.New("ListingPriceReduced: empty newPrice")
-	}
-
-	now := time.Now()
-	return l.db.Transaction(func(tx *gorm.DB) error {
-		var ref model.ChainRefEntryOrder
-		if err := tx.Where("listing_hash = ?", listingHash).First(&ref).Error; err != nil {
-			return fmt.Errorf("find listing ref failed: %w", err)
-		}
-		priceFloat := weiToBtFloat(data.NewPrice)
-		return tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
-			"price":       priceFloat,
-			"update_time": now,
-		}).Error
-	})
-}
-
 // weiToBtFloat 将 18 位 wei 转为 BT 浮点（与前端 parseUnits 精度对齐）。
 func weiToBtFloat(wei *big.Int) float64 {
 	scale := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
@@ -341,61 +242,76 @@ func weiToBtFloat(wei *big.Int) float64 {
 	return f
 }
 
-// onListingCancelled 处理取消上架事件。
-func (l *MarketplaceListener) onListingCancelled(vLog types.Log) error {
-	if len(vLog.Topics) < 2 {
-		return errors.New("invalid ListingCancelled topics")
+// onOrderCancelled 处理合约的取消事件（取消上架/撤回出价）。
+// BloomMarketplace.sol: event OrderCancelled(bytes32 indexed orderHash, address indexed maker, bool isListing);
+// - isListing=true  => cancel 上架：topics[1]=listingHash
+// - isListing=false => cancel 出价：topics[1]=bidHash
+func (l *MarketplaceListener) onOrderCancelled(vLog types.Log, ev *abi.Event) error {
+	var data struct {
+		IsListing bool
 	}
-	listingHash := strings.ToLower(vLog.Topics[1].Hex())
+	if err := l.abiObj.UnpackIntoInterface(&data, ev.Name, vLog.Data); err != nil {
+		return fmt.Errorf("unpack OrderCancelled failed: %w", err)
+	}
+	if len(vLog.Topics) < 2 {
+		return errors.New("invalid OrderCancelled topics")
+	}
 
-	// 更新订单状态；并将该单下「进行中」的出价改为已下架，便于前端与链上一致（买家应走 cancelBid 取回托管）。
+	orderHash := strings.ToLower(vLog.Topics[1].Hex())
 	now := time.Now()
+
 	return l.db.Transaction(func(tx *gorm.DB) error {
-		var ref model.ChainRefEntryOrder
-		if err := tx.Where("listing_hash = ?", listingHash).First(&ref).Error; err != nil {
-			return fmt.Errorf("find listing ref failed: %w", err)
-		}
-		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
-			"status":      enums.ListingCancelled,
-			"update_time": now,
-		}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&model.BidPlaced{}).
-			Where("orders_id = ? AND status = ?", ref.EntryOrderID, enums.BidPending).
-			Updates(map[string]any{
-				"status":      enums.BidDelisted,
+		if data.IsListing {
+			// 取消上架订单：更新 entry_orders 状态为 ListingCancelled，并更新其 pending 的 bids 状态为 BidDelisted
+			var entry model.EntryOrders
+			if err := tx.Where("listing_hash = ?", orderHash).First(&entry).Error; err != nil {
+				return fmt.Errorf("find entry order failed: %w", err)
+			}
+			if err := tx.Model(&model.EntryOrders{}).Where("id = ?", entry.ID).Updates(map[string]any{
+				"status":      enums.ListingCancelled,
 				"update_time": now,
-			}).Error
+			}).Error; err != nil {
+				return err
+			}
+			return tx.Model(&model.BidPlaced{}).
+				Where("orders_id = ? AND status = ?", entry.ID, enums.BidPending).
+				Updates(map[string]any{
+					"status":      enums.BidDelisted,
+					"update_time": now,
+				}).Error
+		}
+
+		// cancelBidOrder: update orders_bid
+		return tx.Model(&model.BidPlaced{}).Where("bid_hash = ?", orderHash).Updates(map[string]any{
+			"status":      enums.BidCancelled,
+			"update_time": now,
+		}).Error
 	})
 }
 
 // onBuy 处理购买事件。
 func (l *MarketplaceListener) onBuy(vLog types.Log) error {
-	if len(vLog.Topics) < 3 {
+	// 新合约 Buy 事件：topics[1]=listingHash, topics[2]=seller, topics[3]=buyer
+	if len(vLog.Topics) < 4 {
 		return errors.New("invalid Buy topics")
 	}
 
 	// 获取 listingHash。
 	listingHash := strings.ToLower(vLog.Topics[1].Hex())
-	buyer := common.HexToAddress(vLog.Topics[2].Hex()).Hex()
+	buyer := common.HexToAddress(vLog.Topics[3].Hex()).Hex()
 	now := time.Now()
 
 	// 更新订单状态。
 	return l.db.Transaction(func(tx *gorm.DB) error {
-		// 查询链上映射。
-		var ref model.ChainRefEntryOrder
-		if err := tx.Where("listing_hash = ?", listingHash).First(&ref).Error; err != nil {
-			return fmt.Errorf("find listing ref failed: %w", err)
-		}
 		var entry model.EntryOrders
-		if err := tx.Where("id = ?", ref.EntryOrderID).First(&entry).Error; err != nil {
+		if err := tx.Where("listing_hash = ?", listingHash).First(&entry).Error; err != nil {
 			return fmt.Errorf("find entry order failed: %w", err)
 		}
 		buyerLower := strings.ToLower(buyer)
-		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", ref.EntryOrderID).Updates(map[string]any{
+		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", entry.ID).Updates(map[string]any{
 			"status":      enums.ListingCompleted,
 			"buyer":       buyerLower,
+			"tx_hash":     vLog.TxHash.Hex(),
 			"update_time": now,
 		}).Error; err != nil {
 			return err
@@ -408,7 +324,7 @@ func (l *MarketplaceListener) onBuy(vLog types.Log) error {
 		}
 		// 直购成交时，该单下仍在进行中的出价均视为未中标，买家可链上 refundLosingBid
 		return tx.Model(&model.BidPlaced{}).
-			Where("orders_id = ? AND status = ?", ref.EntryOrderID, enums.BidPending).
+			Where("orders_id = ? AND status = ?", entry.ID, enums.BidPending).
 			Updates(map[string]any{
 				"status":      enums.BidOutbid,
 				"update_time": now,
@@ -416,101 +332,19 @@ func (l *MarketplaceListener) onBuy(vLog types.Log) error {
 	})
 }
 
-// onBidPlaced 处理出价事件。
-func (l *MarketplaceListener) onBidPlaced(vLog types.Log, ev *abi.Event) error {
-	if len(vLog.Topics) < 4 {
-		return errors.New("invalid BidPlaced topics")
-	}
-	var data struct {
-		Price    *big.Int
-		Deadline *big.Int
-		Salt     *big.Int
-	}
-
-	// 解析事件数据。
-	if err := l.abiObj.UnpackIntoInterface(&data, ev.Name, vLog.Data); err != nil {
-		return fmt.Errorf("unpack BidPlaced failed: %w", err)
-	}
-
-	// 获取 bidHash。
-	bidHash := strings.ToLower(vLog.Topics[1].Hex())
-	// 获取 listingHash。
-	listingHash := strings.ToLower(vLog.Topics[2].Hex())
-	// 获取买家地址。
-	buyer := strings.ToLower(common.HexToAddress(vLog.Topics[3].Hex()).Hex())
-	// 获取当前时间。
-	now := time.Now()
-
-	// 更新订单状态。
-	return l.db.Transaction(func(tx *gorm.DB) error {
-		var entryRef model.ChainRefEntryOrder
-		if err := tx.Where("listing_hash = ?", listingHash).First(&entryRef).Error; err != nil {
-			return fmt.Errorf("find entry ref failed: %w", err)
-		}
-
-		// 查询出价。
-		var bid model.BidPlaced
-		if err := tx.Where("orders_id = ? AND buyer = ? AND salt = ?",
-			entryRef.EntryOrderID, buyer, data.Salt.String(),
-		).Order("id DESC").First(&bid).Error; err != nil {
-			return fmt.Errorf("find bid_placed failed: %w", err)
-		}
-
-		// 更新出价状态。
-		if err := tx.Model(&model.BidPlaced{}).Where("id = ?", bid.ID).Updates(map[string]any{
-			"status":      enums.BidPending,
-			"tx_hash":     vLog.TxHash.Hex(),
-			"update_time": now,
-		}).Error; err != nil {
-			return fmt.Errorf("update bid_placed failed: %w", err)
-		}
-
-		// 插入链上映射。
-		ref := model.ChainRefBid{
-			BidID:      bid.ID,
-			BidHash:    bidHash,
-			CreateTime: now,
-			UpdateTime: now,
-		}
-		if err := tx.Where("bid_hash = ?", ref.BidHash).Assign(ref).FirstOrCreate(&ref).Error; err != nil {
-			return fmt.Errorf("upsert bid ref failed: %w", err)
-		}
-
-		return nil
-	})
-}
-
-// onBidCancelled 处理撤回出价事件。
-func (l *MarketplaceListener) onBidCancelled(vLog types.Log) error {
-	if len(vLog.Topics) < 2 {
-		return errors.New("invalid BidCancelled topics")
-	}
-	// 获取 bidHash。
-	bidHash := strings.ToLower(vLog.Topics[1].Hex())
-	// 获取当前时间。
-	now := time.Now()
-	// 更新订单状态。
-	return l.db.Transaction(func(tx *gorm.DB) error {
-		// 查询链上映射。
-		var ref model.ChainRefBid
-		if err := tx.Where("bid_hash = ?", bidHash).First(&ref).Error; err != nil {
-			return fmt.Errorf("find bid ref failed: %w", err)
-		}
-		return tx.Model(&model.BidPlaced{}).Where("id = ?", ref.BidID).Updates(map[string]any{
-			"status":      enums.BidCancelled,
-			"update_time": now,
-		}).Error
-	})
-}
-
 // onBidAccepted 处理接受出价事件。
 func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
+	// 新合约 BidAccepted 事件：topics[1]=listingHash, topics[2]=bidHash
 	if len(vLog.Topics) < 3 {
 		return errors.New("invalid BidAccepted topics")
 	}
 	var data struct {
-		Seller common.Address
-		Buyer  common.Address
+		// BidAccepted 事件 data（不含 indexed 字段）顺序为：buyer,nft,tokenId,price,fee
+		Buyer   common.Address
+		Nft     common.Address
+		TokenId *big.Int
+		Price   *big.Int
+		Fee     *big.Int
 	}
 
 	// 解析事件数据。
@@ -529,32 +363,28 @@ func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
 
 	// 更新订单状态。
 	return l.db.Transaction(func(tx *gorm.DB) error {
-		// 查询链上映射。
-		var listingRef model.ChainRefEntryOrder
-		if err := tx.Where("listing_hash = ?", listingHash).First(&listingRef).Error; err != nil {
-			return fmt.Errorf("find listing ref failed: %w", err)
-		}
 		var entry model.EntryOrders
-		if err := tx.Where("id = ?", listingRef.EntryOrderID).First(&entry).Error; err != nil {
+		if err := tx.Where("listing_hash = ?", listingHash).First(&entry).Error; err != nil {
 			return fmt.Errorf("find entry order failed: %w", err)
 		}
 		// 更新订单状态。
-		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", listingRef.EntryOrderID).Updates(map[string]any{
+		if err := tx.Model(&model.EntryOrders{}).Where("id = ?", entry.ID).Updates(map[string]any{
 			"status":      enums.ListingCompleted,
 			"buyer":       buyer,
+			"tx_hash":     vLog.TxHash.Hex(),
 			"update_time": now,
 		}).Error; err != nil {
 			return err
 		}
 
-		// 查询链上映射。
-		var bidRef model.ChainRefBid
-		if err := tx.Where("bid_hash = ?", bidHash).First(&bidRef).Error; err != nil {
-			return fmt.Errorf("find bid ref failed: %w", err)
+		var bid model.BidPlaced
+		if err := tx.Where("bid_hash = ?", bidHash).First(&bid).Error; err != nil {
+			return fmt.Errorf("find bid failed: %w", err)
 		}
 		// 更新中标出价状态。
-		if err := tx.Model(&model.BidPlaced{}).Where("id = ?", bidRef.BidID).Updates(map[string]any{
+		if err := tx.Model(&model.BidPlaced{}).Where("id = ?", bid.ID).Updates(map[string]any{
 			"status":      enums.BidCompleted,
+			"tx_hash":     vLog.TxHash.Hex(),
 			"update_time": now,
 		}).Error; err != nil {
 			return err
@@ -570,38 +400,11 @@ func (l *MarketplaceListener) onBidAccepted(vLog types.Log) error {
 
 		// 其余仍处于「进行中」的出价标记为未中标，买家需调用合约 refundLosingBid 取回托管 BT
 		return tx.Model(&model.BidPlaced{}).
-			Where("orders_id = ? AND id <> ? AND status = ?", listingRef.EntryOrderID, bidRef.BidID, enums.BidPending).
+			Where("orders_id = ? AND id <> ? AND status = ?", entry.ID, bid.ID, enums.BidPending).
 			Updates(map[string]any{
 				"status":      enums.BidOutbid,
 				"update_time": now,
 			}).Error
-	})
-}
-
-// onBidRefunded 处理未中标出价的链上退款完成事件。
-func (l *MarketplaceListener) onBidRefunded(vLog types.Log) error {
-	if len(vLog.Topics) < 3 {
-		return errors.New("invalid BidRefunded topics")
-	}
-	bidHash := strings.ToLower(vLog.Topics[1].Hex())
-	var data struct {
-		Amount *big.Int
-	}
-	if err := l.abiObj.UnpackIntoInterface(&data, "BidRefunded", vLog.Data); err != nil {
-		return fmt.Errorf("unpack BidRefunded failed: %w", err)
-	}
-	_ = data.Amount
-
-	now := time.Now()
-	return l.db.Transaction(func(tx *gorm.DB) error {
-		var ref model.ChainRefBid
-		if err := tx.Where("bid_hash = ?", bidHash).First(&ref).Error; err != nil {
-			return fmt.Errorf("find bid ref failed: %w", err)
-		}
-		return tx.Model(&model.BidPlaced{}).Where("id = ?", ref.BidID).Updates(map[string]any{
-			"status":      enums.BidRefunded,
-			"update_time": now,
-		}).Error
 	})
 }
 

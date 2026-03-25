@@ -13,12 +13,11 @@ type NftOrdersRepository struct {
 	DB *gorm.DB
 }
 
-// EntryOrdersWithImageUrl 用于关联查询：entry_orders + nft_list.image_url + chain_ref_entry_order.listing_hash
+// EntryOrdersWithImageUrl 用于关联查询：entry_orders + nft_list.image_url
 // 该结构只用于查询结果，不参与自动建表。
 type EntryOrdersWithImageUrl struct {
 	model.EntryOrders
 	ImageUrl    string `gorm:"column:image_url"`
-	ListingHash string `gorm:"column:listing_hash"`
 }
 
 func NewNftOrdersRepository(db *gorm.DB) *NftOrdersRepository {
@@ -39,21 +38,20 @@ func (n *NftOrdersRepository) InsertBidPlaced(bidPlaced model.BidPlaced) error {
 func (n *NftOrdersRepository) GetEntryOrdersList(nftId *uint, status *enums.ListingStatus) ([]EntryOrdersWithImageUrl, error) {
 	var entryOrders []EntryOrdersWithImageUrl
 	q := n.DB.
-		Table("entry_orders").
-		Select("entry_orders.*, nft_list.image_url AS image_url, chain_ref_entry_order.listing_hash AS listing_hash").
-		Joins("LEFT JOIN nft_list ON nft_list.id = entry_orders.nft_list_id").
-		Joins("LEFT JOIN chain_ref_entry_order ON chain_ref_entry_order.entry_order_id = entry_orders.id")
+		Table("orders_entry").
+		Select("orders_entry.*, nft_list.image_url AS image_url").
+		Joins("LEFT JOIN nft_list ON nft_list.id = orders_entry.nft_list_id")
 
 	if nftId != nil {
-		// nftId 对应的是 entry_orders.nft_list_id
-		q = q.Where("entry_orders.nft_list_id = ?", *nftId)
+		// nftId 对应的是 orders_entry.nft_list_id
+		q = q.Where("orders_entry.nft_list_id = ?", *nftId)
 	}
 	if status != nil {
-		q = q.Where("entry_orders.status = ?", *status)
+		q = q.Where("orders_entry.status = ?", *status)
 	}
 
 	if err := q.
-		Order("entry_orders.create_time DESC").
+		Order("orders_entry.create_time DESC").
 		Find(&entryOrders).Error; err != nil {
 		return nil, err
 	}
@@ -65,12 +63,11 @@ func (n *NftOrdersRepository) GetEntryOrdersList(nftId *uint, status *enums.List
 func (n *NftOrdersRepository) GetEntryOrdersBySeller(seller string) ([]EntryOrdersWithImageUrl, error) {
 	var entryOrders []EntryOrdersWithImageUrl
 	err := n.DB.
-		Table("entry_orders").
-		Select("entry_orders.*, nft_list.image_url AS image_url, chain_ref_entry_order.listing_hash AS listing_hash").
-		Joins("LEFT JOIN nft_list ON nft_list.id = entry_orders.nft_list_id").
-		Joins("LEFT JOIN chain_ref_entry_order ON chain_ref_entry_order.entry_order_id = entry_orders.id").
-		Where("LOWER(entry_orders.seller) = LOWER(?)", seller).
-		Order("entry_orders.create_time DESC").
+		Table("orders_entry").
+		Select("orders_entry.*, nft_list.image_url AS image_url").
+		Joins("LEFT JOIN nft_list ON nft_list.id = orders_entry.nft_list_id").
+		Where("LOWER(orders_entry.seller) = LOWER(?)", seller).
+		Order("orders_entry.create_time DESC").
 		Find(&entryOrders).Error
 	if err != nil {
 		return nil, err
@@ -102,16 +99,15 @@ type BidHistoryRow struct {
 // GetBidHistoryByBuyer 当前用户作为买家的全部出价记录
 func (n *NftOrdersRepository) GetBidHistoryByBuyer(buyer string) ([]BidHistoryRow, error) {
 	var rows []BidHistoryRow
-	err := n.DB.Table("bid_placed").
-		Select(`bid_placed.id, bid_placed.orders_id, bid_placed.buyer, bid_placed.price, bid_placed.deadline, bid_placed.salt, bid_placed.status, bid_placed.signature, bid_placed.tx_hash, bid_placed.create_time, bid_placed.update_time,
-			entry_orders.nft_list_id AS nft_list_id, entry_orders.token_id AS token_id, entry_orders.seller AS entry_seller, entry_orders.status AS entry_order_status,
+	err := n.DB.Table("orders_bid").
+		Select(`orders_bid.id, orders_bid.orders_id, orders_bid.buyer, orders_bid.price, orders_bid.deadline, orders_bid.salt, orders_bid.status, orders_bid.signature, orders_bid.tx_hash, orders_bid.create_time, orders_bid.update_time,
+			orders_entry.nft_list_id AS nft_list_id, orders_entry.token_id AS token_id, orders_entry.seller AS entry_seller, orders_entry.status AS entry_order_status,
 			COALESCE(nft_list.image_url, '') AS image_url,
-			COALESCE(chain_ref_entry_order.listing_hash, '') AS listing_hash`).
-		Joins("INNER JOIN entry_orders ON entry_orders.id = bid_placed.orders_id").
-		Joins("LEFT JOIN nft_list ON nft_list.id = entry_orders.nft_list_id").
-		Joins("LEFT JOIN chain_ref_entry_order ON chain_ref_entry_order.entry_order_id = entry_orders.id").
-		Where("LOWER(bid_placed.buyer) = LOWER(?)", buyer).
-		Order("bid_placed.create_time DESC").
+			COALESCE(orders_entry.listing_hash, '') AS listing_hash`).
+		Joins("INNER JOIN orders_entry ON orders_entry.id = orders_bid.orders_id").
+		Joins("LEFT JOIN nft_list ON nft_list.id = orders_entry.nft_list_id").
+		Where("LOWER(orders_bid.buyer) = LOWER(?)", buyer).
+		Order("orders_bid.create_time DESC").
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err

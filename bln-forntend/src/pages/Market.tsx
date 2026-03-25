@@ -59,6 +59,11 @@ interface EntryOrder {
   listingHash?: string;
   /** Merkle 批量上架：购买时无需 listing 单笔签名 */
   isMerkle?: boolean;
+
+  // buy / buyBatch 的 Merkle 参数（仅当 isMerkle=true 时生效）
+  merkleRoot?: string;
+  rootDeadlineSec?: number;
+  merkleProof?: string[];
 }
 
 interface BidItem {
@@ -71,25 +76,24 @@ interface BidItem {
   status: number;
   txHash?: string;
   signature?: string;
+  bidHash?: string;
 }
 
 function bidStatusText(status: number) {
   switch (status) {
     case 0:
-      return "准备中";
-    case 1:
       return "进行中";
-    case 2:
+    case 1:
       return "已成交";
-    case 3:
+    case 2:
       return "已过期";
-    case 4:
+    case 3:
       return "取消出价";
-    case 5:
+    case 4:
       return "已下架";
-    case 6:
+    case 5:
       return "未中标";
-    case 7:
+    case 6:
       return "已退款";
     default:
       return String(status);
@@ -120,7 +124,6 @@ export function Market() {
   const [detailOrder, setDetailOrder] = useState<EntryOrder | null>(null);
   const [bidList, setBidList] = useState<BidItem[]>([]);
   const [bidListLoading, setBidListLoading] = useState(false);
-  const [refundBidId, setRefundBidId] = useState<number | null>(null);
   const [cancelBidId, setCancelBidId] = useState<number | null>(null);
   /** 购物车：订单 id 集合，用于 buyBatch */
   const [cartIds, setCartIds] = useState<Set<number>>(() => new Set());
@@ -171,7 +174,7 @@ export function Market() {
       setError("请先连接钱包。");
       return;
     }
-    if (order.status !== 1) {
+    if (order.status !== 0) {
       setError("当前订单状态不可购买。");
       return;
     }
@@ -183,15 +186,17 @@ export function Market() {
       const marketplaceAddress = getBloomMarketplaceAddress(chainId);
       const tokenContract = getBloomTokenContract(signer, chainId);
       const marketplace = getBloomMarketplaceContract(signer, chainId);
-      const lhRaw = order.listingHash?.trim();
-      if (!lhRaw) {
-        setError("缺少 listingHash（请等待上架同步后再购买）。");
-        return;
+      const isMerkle = order.isMerkle === true;
+      const zeroBytes32 = "0x" + "0".repeat(64);
+      if (isMerkle) {
+        if (!order.merkleRoot || !order.rootDeadlineSec || !order.merkleProof) {
+          throw new Error("Merkle 订单缺少 merkle 参数（merkleRoot/rootDeadlineSec/merkleProof）。");
+        }
       }
-      const listingHashHex = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
-      // 验签必须用卖家当初签名的原价；实际扣款由合约按 effectiveListingPrice 结算（含链上降价）
-      const origWei: bigint = await marketplace.listingOriginalPrice(listingHashHex);
-      const payWei: bigint = await marketplace.effectiveListingPrice(listingHashHex);
+      // 当前合约 ABI 中没有 listingOriginalPrice/effectiveListingPrice，
+      // 用订单当前 price 作为 listing.price 来构造 Listing，确保签名验签使用同一组字段。
+      const origWei: bigint = parseUnits(String(order.price), 18);
+      const payWei: bigint = origWei;
       const allowance: bigint = await tokenContract.allowance(account, marketplaceAddress);
       if (allowance < payWei) {
         const approveTx = await tokenContract.approve(marketplaceAddress, payWei);
@@ -207,13 +212,31 @@ export function Market() {
         salt: BigInt(order.salt || "0"),
       };
 
-      const listingSig =
-        order.isMerkle === true
-          ? "0x"
-          : order.signature.startsWith("0x")
-            ? order.signature
-            : `0x${order.signature}`;
-      const tx = await marketplace.buy(listing, listingSig);
+      const normalizeSig = (s: string) =>
+        s.startsWith("0x") ? s : `0x${s}`;
+      const listingSig = isMerkle ? "0x" : normalizeSig(order.signature);
+
+      const proof = isMerkle
+        ? (order.merkleProof || []).map((p) =>
+            p.startsWith("0x") ? p : `0x${p}`
+          )
+        : [];
+      const merkleRoot = isMerkle
+        ? order.merkleRoot!.startsWith("0x")
+          ? order.merkleRoot!
+          : `0x${order.merkleRoot!}`
+        : zeroBytes32;
+      const rootDeadline = isMerkle ? BigInt(order.rootDeadlineSec || 0) : 0n;
+      const batchSig = isMerkle ? normalizeSig(order.signature) : "0x";
+      // ABI：buy(Listing, listingSignature, proof, merkleRoot, rootDeadline, batchSignature)
+      const tx = await marketplace.buy(
+        listing,
+        listingSig,
+        proof,
+        merkleRoot,
+        rootDeadline,
+        batchSig
+      );
       await tx.wait();
       setSuccess("购买交易已提交并确认。");
       await fetchOrders();
@@ -239,7 +262,7 @@ export function Market() {
       setError("请先连接钱包。");
       return;
     }
-    const selected = orders.filter((o) => cartIds.has(o.id) && o.status === 1);
+    const selected = orders.filter((o) => cartIds.has(o.id) && o.status === 0);
     if (selected.length < 2) {
       setError("请至少勾选 2 个「进行中」订单用于批量购买。");
       return;
@@ -253,6 +276,9 @@ export function Market() {
       const marketplace = getBloomMarketplaceContract(signer, chainId);
       const nftAddr = getBloomNFTAddress(chainId);
 
+      const zeroBytes32 = "0x" + "0".repeat(64);
+      const normalizeSig = (s: string) => (s.startsWith("0x") ? s : `0x${s}`);
+
       const listings: Array<{
         nft: string;
         seller: string;
@@ -261,32 +287,48 @@ export function Market() {
         deadline: bigint;
         salt: bigint;
       }> = [];
-      const sigs: string[] = [];
+      const listingSignatures: string[] = [];
+      const proofs: string[][] = [];
+      const merkleRoots: string[] = [];
+      const rootDeadlines: bigint[] = [];
+      const batchSignatures: string[] = [];
+
       let totalPay = 0n;
       for (const o of selected) {
-        const lhRaw = o.listingHash?.trim();
-        if (!lhRaw) {
-          throw new Error("某条订单缺少 listingHash，请等待同步后重试。");
-        }
-        const listingHashHex = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
-        const origWei = await marketplace.listingOriginalPrice(listingHashHex);
-        const payWei = await marketplace.effectiveListingPrice(listingHashHex);
-        totalPay += payWei;
+        const priceWei = parseUnits(String(o.price), 18);
+        totalPay += priceWei;
         listings.push({
           nft: nftAddr,
           seller: o.seller,
           tokenId: BigInt(o.tokenId),
-          price: origWei,
+          price: priceWei,
           deadline: BigInt(Math.floor(new Date(o.deadline).getTime() / 1000)),
           salt: BigInt(o.salt || "0"),
         });
-        const sig =
-          o.isMerkle === true
-            ? "0x"
-            : o.signature.startsWith("0x")
-              ? o.signature
-              : `0x${o.signature}`;
-        sigs.push(sig);
+
+        const isMerkle = o.isMerkle === true;
+        if (isMerkle) {
+          if (!o.merkleRoot || o.rootDeadlineSec == null || !o.merkleProof) {
+            throw new Error(
+              "Merkle 订单缺少 merkleRoot/rootDeadlineSec/merkleProof，无法批量购买。"
+            );
+          }
+          listingSignatures.push("0x");
+          proofs.push(
+            o.merkleProof.map((p) => (p.startsWith("0x") ? p : `0x${p}`))
+          );
+          merkleRoots.push(
+            o.merkleRoot.startsWith("0x") ? o.merkleRoot : `0x${o.merkleRoot}`
+          );
+          rootDeadlines.push(BigInt(o.rootDeadlineSec));
+          batchSignatures.push(normalizeSig(o.signature));
+        } else {
+          listingSignatures.push(normalizeSig(o.signature));
+          proofs.push([]);
+          merkleRoots.push(zeroBytes32);
+          rootDeadlines.push(0n);
+          batchSignatures.push("0x");
+        }
       }
 
       const allowance: bigint = await tokenContract.allowance(account, marketplaceAddress);
@@ -295,7 +337,14 @@ export function Market() {
         await approveTx.wait();
       }
 
-      const tx = await marketplace.buyBatch(listings, sigs);
+      const tx = await marketplace.buyBatch(
+        listings,
+        listingSignatures,
+        proofs,
+        merkleRoots,
+        rootDeadlines,
+        batchSignatures
+      );
       await tx.wait();
       setSuccess(`批量购买已确认（${selected.length} 笔）。`);
       setCartIds(new Set());
@@ -323,11 +372,6 @@ export function Market() {
       setError("请选择出价截止时间。");
       return;
     }
-    const lhRaw = selectedOrder.listingHash?.trim();
-    if (!lhRaw) {
-      setError("缺少 listingHash（请等待上架同步后再出价，或刷新列表）。");
-      return;
-    }
     try {
       setBidSubmittingId(selectedOrder.id);
       setError(null);
@@ -349,9 +393,6 @@ export function Market() {
 
       // Bid 需要 salt 用于唯一标识 bid（合约层面进入 EIP-712 计算）。
       const bidSaltBig = BigInt(hexlify(randomBytes(32)));
-      // Bid.listingHash 必须与链上一致：不能用「当前 order.price」重算 Listing，否则降价后
-      // 会得到错误 hash，与后端上链时使用的 listingHash 不一致 → bad bid sig
-      const listingHash = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
       const signature = await signer.signTypedData(
         {
           name: "BloomMarketplace",
@@ -361,16 +402,18 @@ export function Market() {
         },
         {
           Bid: [
-            { name: "listingHash", type: "bytes32" },
+            { name: "nft", type: "address" },
             { name: "buyer", type: "address" },
+            { name: "tokenId", type: "uint256" },
             { name: "price", type: "uint256" },
             { name: "deadline", type: "uint256" },
             { name: "salt", type: "uint256" },
           ],
         },
         {
-          listingHash,
+          nft: getBloomNFTAddress(chainId),
           buyer: account,
+          tokenId: BigInt(selectedOrder.tokenId),
           price: priceWei,
           deadline: BigInt(deadlineSec),
           salt: bidSaltBig,
@@ -404,67 +447,14 @@ export function Market() {
     }
   };
 
-  /**
-   * 取回托管 BT：链上若该 listing 未成交（sold=false），应走 cancelBid（含：卖家撤单、挂单仍有效时买家主动撤价）；
-   * 若已成交且本笔为未中标，走 refundLosingBid（需当初出价 EIP-712 签名）。
-   */
-  const handleReclaimBidEscrow = async (bid: BidItem) => {
-    const ok = await requestConfirm({
-      title: "确认取回托管 BT",
-      description: `将按链上规则取回托管款（约 ${bid.price} BT）。若挂单未成交将调用「撤回出价」；若已成交且未中标将调用「未中标退款」。`,
-    });
-    if (!ok) return;
-    if (!detailOrder || !signer || chainId == null || !account) {
-      setError("请先连接钱包。");
-      return;
-    }
-    if (!detailOrder.listingHash?.trim()) {
-      setError("缺少 listingHash（挂单可能尚未完成链上同步），请稍后重试或刷新列表。");
-      return;
-    }
-    setRefundBidId(bid.id);
-    setError(null);
-    setSuccess(null);
-    try {
-      const mp = getBloomMarketplaceContract(signer, chainId);
-      const lhRaw = detailOrder.listingHash.trim();
-      const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
-      const bidStruct = {
-        listingHash: lh,
-        buyer: bid.buyer,
-        price: parseUnits(String(bid.price), 18),
-        deadline: BigInt(Math.floor(new Date(bid.deadline).getTime() / 1000)),
-        salt: BigInt(bid.salt),
-      };
-      const sold: boolean = await mp.sold(lh);
-      let tx;
-      if (!sold) {
-        tx = await mp.cancelBid(bidStruct);
-      } else {
-        if (!bid.signature) {
-          setError("缺少出价签名数据，无法领取未中标退款。");
-          return;
-        }
-        const sig = bid.signature.startsWith("0x") ? bid.signature : `0x${bid.signature}`;
-        tx = await mp.refundLosingBid(bidStruct, sig);
-      }
-      await tx.wait();
-      setSuccess("交易已确认，托管款将退回钱包；数据库状态由监听器同步。");
-      await openOrderDetail(detailOrder);
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : undefined;
-      setError(msg || "取回托管失败");
-    } finally {
-      setRefundBidId(null);
-    }
-  };
+  // 新版：不再托管代币，因此不需要“取回托管/退款”相关逻辑。
 
   const handleCancelBid = async (bid: BidItem) => {
     if (!detailOrder || !signer || chainId == null || !account) {
       setError("请先连接钱包。");
       return;
     }
-    if (detailOrder.status !== 1) {
+    if (detailOrder.status !== 0) {
       setError("当前挂单不在进行中状态，无法撤回出价。");
       return;
     }
@@ -472,14 +462,9 @@ export function Market() {
       setError("只能由出价者本人撤回出价。");
       return;
     }
-    if (!detailOrder.listingHash?.trim()) {
-      setError("缺少 listingHash（挂单可能尚未完成链上同步），请稍后重试或刷新列表。");
-      return;
-    }
-
     const ok = await requestConfirm({
       title: "确认撤回出价",
-      description: `将撤回该笔出价并取回托管 BT（约 ${bid.price} BT）。`,
+      description: `将撤回该笔出价并使其在链上失效（不涉及托管退款）。`,
     });
     if (!ok) return;
 
@@ -488,17 +473,16 @@ export function Market() {
     setSuccess(null);
     try {
       const mp = getBloomMarketplaceContract(signer, chainId);
-      const lhRaw = detailOrder.listingHash.trim();
-      const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
       const bidStruct = {
-        listingHash: lh,
+        nft: getBloomNFTAddress(chainId),
         buyer: bid.buyer,
+        tokenId: BigInt(detailOrder.tokenId),
         price: parseUnits(String(bid.price), 18),
         deadline: BigInt(Math.floor(new Date(bid.deadline).getTime() / 1000)),
         salt: BigInt(bid.salt),
       };
 
-      const tx = await mp.cancelBid(bidStruct);
+      const tx = await mp.cancelBidOrder(bidStruct);
       await tx.wait();
       setSuccess("撤回出价已确认，托管款将退回。");
       await openOrderDetail(detailOrder);
@@ -611,7 +595,7 @@ export function Market() {
                     <Checkbox
                       size="small"
                       checked={cartIds.has(o.id)}
-                      disabled={o.status !== 1}
+                      disabled={o.status !== 0}
                       onChange={() => toggleCart(o.id)}
                       inputProps={{ "aria-label": `cart ${o.id}` }}
                     />
@@ -640,7 +624,7 @@ export function Market() {
                       <Button
                         variant="contained"
                         size="small"
-                        disabled={buySubmittingId === o.id || o.status !== 1}
+                        disabled={buySubmittingId === o.id || o.status !== 0}
                         onClick={() => void handleBuy(o)}
                       >
                         {buySubmittingId === o.id ? "购买中..." : "购买"}
@@ -648,7 +632,7 @@ export function Market() {
                       <Button
                         variant="outlined"
                         size="small"
-                        disabled={o.status !== 1}
+                        disabled={o.status !== 0}
                         onClick={() => openBidDialog(o)}
                       >
                         出价
@@ -719,15 +703,11 @@ export function Market() {
                 </TableHead>
                 <TableBody>
                   {bidList.map((b) => {
-                    // 仅「已过期 / 已下架 / 未中标」可取回托管；进行中/取消出价单由链上事件维护状态
+                    // 仅「进行中」且由出价者本人可撤回出价（使其在链上失效）。
                     const canCancel =
                       detailOrder &&
-                      detailOrder.status === 1 &&
-                      b.status === 1 &&
-                      account &&
-                      b.buyer.toLowerCase() === account.toLowerCase();
-                    const canReclaim =
-                      (b.status === 3 || b.status === 5 || b.status === 6) &&
+                      detailOrder.status === 0 &&
+                      b.status === 0 &&
                       account &&
                       b.buyer.toLowerCase() === account.toLowerCase();
                     return (
@@ -737,17 +717,6 @@ export function Market() {
                       <TableCell>{formatDateTime(b.deadline)}</TableCell>
                       <TableCell>{bidStatusText(b.status)}</TableCell>
                       <TableCell align="right">
-                        {canReclaim && (
-                          <Button
-                            size="small"
-                            variant="contained"
-                            color="secondary"
-                            disabled={refundBidId === b.id}
-                            onClick={() => void handleReclaimBidEscrow(b)}
-                          >
-                            {refundBidId === b.id ? "处理中..." : "取回托管 BT"}
-                          </Button>
-                        )}
                         {canCancel && (
                           <Button
                             size="small"

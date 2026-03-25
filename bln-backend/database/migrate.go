@@ -10,7 +10,5 @@ func MigrateModels() []interface{} {
 		&model.BidPlaced{},
 		&model.ChainEventCursor{},
 		&model.ChainEventLog{},
-		&model.ChainRefEntryOrder{},
-		&model.ChainRefBid{},
 	}
 }

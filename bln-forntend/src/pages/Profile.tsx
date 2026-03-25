@@ -80,6 +80,11 @@ interface EntryOrderItem {
   /** Listing EIP-712 salt（十进制字符串） */
   salt?: string;
   isMerkle?: boolean;
+
+  // Merkle 参数：用于 acceptBid 时走 merkle 校验路径
+  merkleRoot?: string;
+  rootDeadlineSec?: number;
+  merkleProof?: string[];
 }
 
 interface BidPlacedItem {
@@ -92,29 +97,28 @@ interface BidPlacedItem {
   status: number;
   txHash?: string;
   createTime?: string;
+  bidHash?: string;
 }
 
 const BID_STATUS_LABELS: Record<number, string> = {
-  0: "准备中",
-  1: "进行中",
-  2: "已成交",
-  3: "已过期",
-  4: "取消出价",
-  5: "已下架",
-  6: "未中标",
-  7: "已退款",
+  0: "进行中",
+  1: "已成交",
+  2: "已过期",
+  3: "取消出价",
+  4: "已下架",
+  5: "未中标",
+  6: "已退款",
 };
 
-/** 挂单 entry_orders.status（ListingStatus 0–4） */
+/** 挂单 entry_orders.status（ListingStatus 0–3） */
 const ORDER_STATUS_LABELS: Record<number, string> = {
-  0: "准备中",
-  1: "进行中",
-  2: "已成交",
-  3: "已过期",
-  4: "已取消",
+  0: "进行中",
+  1: "已成交",
+  2: "已过期",
+  3: "已取消",
 };
 
-/** 仅保留「当前钱包 + 进行中(1) / 已过期(3)」的挂单；
+/** 仅保留「当前钱包 + 进行中(0) / 已过期(2)」的挂单；
  * 同一 nftListId 取 id 最大的一条
  */
 function buildActiveListingMap(
@@ -125,7 +129,7 @@ function buildActiveListingMap(
   const map: Record<number, EntryOrderItem> = {};
   for (const o of orders) {
     if (o.seller.toLowerCase() !== w) continue;
-    if (o.status !== 1 && o.status !== 3) continue;
+    if (o.status !== 0 && o.status !== 2) continue;
     const prev = map[o.nftListId];
     if (!prev || o.id > prev.id) {
       map[o.nftListId] = o;
@@ -191,9 +195,7 @@ export function Profile() {
   const [historyOrdersLoading, setHistoryOrdersLoading] = useState(false);
   const [historyBidsLoading, setHistoryBidsLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
-  const [reclaimHistoryBidId, setReclaimHistoryBidId] = useState<number | null>(
-    null
-  );
+  // 新版：不再托管代币，因此不需要“取回托管/退款”相关状态与操作。
 
   /** NFT 卡片「操作」下拉菜单（进行中挂单时） */
   const [actionMenu, setActionMenu] = useState<{
@@ -313,56 +315,7 @@ export function Profile() {
     }
   };
 
-  const handleReclaimBidFromHistory = async (row: MyBidHistoryRow) => {
-    if (!account || !signer || chainId == null) {
-      setHistoryError("请先连接钱包。");
-      return;
-    }
-    const lhRaw = row.listingHash?.trim();
-    if (!lhRaw) {
-      setHistoryError("缺少 listingHash，请等待同步后重试。");
-      return;
-    }
-    const ok = await requestConfirm({
-      title: "确认取回托管 BT",
-      description: `约 ${row.price} BT。未成交挂单将走「撤回出价」；已成交未中标将走「未中标退款」。`,
-    });
-    if (!ok) return;
-    setReclaimHistoryBidId(row.id);
-    setHistoryError(null);
-    try {
-      const mp = getBloomMarketplaceContract(signer, chainId);
-      const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
-      const bidStruct = {
-        listingHash: lh,
-        buyer: row.buyer,
-        price: parseUnits(String(row.price), 18),
-        deadline: BigInt(Math.floor(new Date(row.deadline).getTime() / 1000)),
-        salt: BigInt(row.salt),
-      };
-      const sold: boolean = await mp.sold(lh);
-      let tx;
-      if (!sold) {
-        tx = await mp.cancelBid(bidStruct);
-      } else {
-        if (!row.signature) {
-          setHistoryError("缺少出价签名，无法领取未中标退款。");
-          return;
-        }
-        const sig = row.signature.startsWith("0x")
-          ? row.signature
-          : `0x${row.signature}`;
-        tx = await mp.refundLosingBid(bidStruct, sig);
-      }
-      await tx.wait();
-      await fetchHistoryBids();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : undefined;
-      setHistoryError(msg || "取回托管失败");
-    } finally {
-      setReclaimHistoryBidId(null);
-    }
-  };
+  // 新版：历史出价不再提供取回/退款操作。
 
   /** 拉取全量挂单 + 所有类目下的持有 NFT（沿用现有接口，无需改后端） */
   const refreshPortfolio = useCallback(async () => {
@@ -634,7 +587,7 @@ export function Profile() {
     }
     const orders = listedOrders.filter(
       (o) =>
-        cancelBatchPicks.has(o.id) && (o.status === 1 || o.status === 3)
+        cancelBatchPicks.has(o.id) && (o.status === 0 || o.status === 2)
     );
     if (orders.length === 0) {
       setError("请勾选至少一笔进行中的挂单。");
@@ -650,25 +603,22 @@ export function Profile() {
     try {
       const mp = getBloomMarketplaceContract(signer, chainId);
       const nftAddr = getBloomNFTAddress(chainId);
-      const listings = [];
+      // 合约当前没有 cancelListingsBatch；这里改为逐笔 cancelListingOrder。
       for (const order of orders) {
-        const lhRaw = order.listingHash?.trim();
-        if (!lhRaw) {
-          throw new Error("部分订单缺少 listingHash，请同步后再试。");
-        }
-        const lh = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
-        const origWei = await mp.listingOriginalPrice(lh);
-        listings.push({
+        const origWei = parseUnits(String(order.price), 18);
+        const listing = {
           nft: nftAddr,
           seller: order.seller,
           tokenId: BigInt(order.tokenId),
           price: origWei,
-          deadline: BigInt(Math.floor(new Date(order.deadline).getTime() / 1000)),
+          deadline: BigInt(
+            Math.floor(new Date(order.deadline).getTime() / 1000)
+          ),
           salt: BigInt(order.salt ?? "0"),
-        });
+        };
+        const tx = await mp.cancelListingOrder(listing);
+        await tx.wait();
       }
-      const tx = await mp.cancelListingsBatch(listings);
-      await tx.wait();
       setCancelBatchPicks(new Set());
       await refreshPortfolio();
     } catch (e: unknown) {
@@ -817,7 +767,7 @@ export function Profile() {
       setError("未找到对应挂单信息，无法取消上架。");
       return;
     }
-    if (order.status !== 1 && order.status !== 3) {
+    if (order.status !== 0 && order.status !== 2) {
       setError("当前状态不可取消上架。");
       return;
     }
@@ -836,8 +786,7 @@ export function Profile() {
         setError("暂无 listingHash（请等待上架同步后再试）。");
         return;
       }
-      const listingHashHex = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
-      const origWei = await marketplace.listingOriginalPrice(listingHashHex);
+      const origWei = parseUnits(String(order.price), 18);
       const listing = {
         nft: getBloomNFTAddress(chainId),
         seller: order.seller,
@@ -847,7 +796,7 @@ export function Profile() {
         salt: BigInt(order.salt ?? "0"),
       };
 
-      const tx = await marketplace.cancelListing(listing);
+      const tx = await marketplace.cancelListingOrder(listing);
       await tx.wait();
 
       await refreshPortfolio();
@@ -873,7 +822,7 @@ export function Profile() {
       return;
     }
     const ao = activeListingByNftListId[changePriceNft.id];
-    if (!ao || ao.status !== 1) {
+    if (!ao || ao.status !== 0) {
       setChangePriceError("未找到进行中的挂单。");
       return;
     }
@@ -887,56 +836,96 @@ export function Profile() {
       setChangePriceError("请输入大于 0 的有效价格（BT）。");
       return;
     }
+    // 规则：
+    // - 提高价格：必须先取消上架（下架当前订单），然后用「挂单」重新签名上架
+    // - 降低价格：不需要先下架，直接生成新的挂单订单（新的签名/新的 listingHash）
     if (newNum >= curNum) {
       setChangePriceError(
-        "提价请先在菜单中「取消上架」，再使用「挂单」以更高价重新上架；链上支持仅「降价」无需下架。"
+        "改高价格：请先在菜单中「取消上架」下架当前订单，然后重新签名上架更高价。"
       );
       return;
     }
-    const lhRaw = ao.listingHash?.trim();
-    if (!lhRaw) {
-      setChangePriceError(
-        "暂无 listingHash（请等待上架交易确认并由服务端同步后再试）。"
-      );
-      return;
-    }
-    const listingHash = lhRaw.startsWith("0x") ? lhRaw : `0x${lhRaw}`;
-    const marketplaceAddress = getBloomMarketplaceAddress(chainId);
+
     setChangePriceSubmitting(true);
     setChangePriceError(null);
     try {
-      const mp = getBloomMarketplaceContract(signer, chainId);
-      const nonceBn = await mp.reductionNonces(account);
       const newWei = parseUnits(String(newNum), 18);
+      const deadlineSeconds = Math.floor(
+        new Date(ao.deadline).getTime() / 1000
+      );
+      if (!Number.isFinite(deadlineSeconds) || deadlineSeconds <= 0) {
+        throw new Error("无效的截止时间（deadline）。");
+      }
+
+      // 复用「挂单」签名逻辑：Listing EIP-712（链上只做结算，订单签名由签名者离线完成）
+      const nftAddress = getBloomNFTAddress(chainId);
+      const marketplaceAddress = getBloomMarketplaceAddress(chainId);
+      const saltBig = BigInt(hexlify(randomBytes(32)));
+
       const domain = {
         name: "BloomMarketplace",
         version: "1",
         chainId,
         verifyingContract: marketplaceAddress,
       };
-      const types = {
-        PriceReduction: [
-          { name: "listingHash", type: "bytes32" },
+
+      const types: Record<string, Array<{ name: string; type: string }>> = {
+        Listing: [
+          { name: "nft", type: "address" },
           { name: "seller", type: "address" },
-          { name: "newPrice", type: "uint256" },
-          { name: "nonce", type: "uint256" },
+          { name: "tokenId", type: "uint256" },
+          { name: "price", type: "uint256" },
+          { name: "deadline", type: "uint256" },
+          { name: "salt", type: "uint256" },
         ],
       };
+
       const value = {
-        listingHash,
+        nft: nftAddress,
         seller: account,
-        newPrice: newWei,
-        nonce: nonceBn,
+        tokenId: BigInt(ao.tokenId),
+        price: newWei,
+        deadline: BigInt(deadlineSeconds),
+        salt: saltBig,
       };
-      const signature = await signer.signTypedData(domain, types, value);
-      const tx = await mp.reduceListingPrice(
-        listingHash,
+
+      // 挂单前确保 marketplace 已被 NFT 合约授权
+      const nftContract = getBloomNFTContract(signer, chainId);
+      const approvedForAll: boolean = await nftContract.isApprovedForAll(
         account,
-        newWei,
-        nonceBn,
-        signature
+        marketplaceAddress
       );
-      await tx.wait();
+      if (!approvedForAll) {
+        const approveTx = await nftContract.setApprovalForAll(
+          marketplaceAddress,
+          true
+        );
+        await approveTx.wait();
+      }
+
+      const signature = await signer.signTypedData(domain, types, value);
+
+      const deadlineIso = new Date(deadlineSeconds * 1000).toISOString();
+      const body = {
+        seller: account,
+        tokenId: Number(ao.tokenId),
+        price: newNum,
+        deadline: deadlineIso,
+        salt: saltBig.toString(),
+        nftListId: Number(changePriceNft.id),
+        signature,
+      };
+
+      const resp = await fetch(API_ENDPOINTS.entryOrders, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data?.code !== 0) {
+        throw new Error(data?.message || "挂单失败");
+      }
+
       setChangePriceDialogOpen(false);
       setChangePriceNft(null);
       await refreshPortfolio();
@@ -987,10 +976,14 @@ export function Profile() {
     setAcceptBidId(bid.id);
     setBidError(null);
     try {
+      const body: Record<string, unknown> = {
+        bidId: bid.id,
+        seller: account,
+      };
       const resp = await fetch(API_ENDPOINTS.bidAccepted, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bidId: bid.id, seller: account }),
+        body: JSON.stringify(body),
       });
       const data = await resp.json();
       if (!resp.ok || data?.code !== 0) {
@@ -1261,7 +1254,7 @@ export function Profile() {
                                 <Checkbox
                                   size="small"
                                   checked={cancelBatchPicks.has(order.id)}
-                                    disabled={order.status !== 1 && order.status !== 3}
+                                    disabled={order.status !== 0 && order.status !== 2}
                                   onChange={() => toggleCancelBatchPick(order.id)}
                                 />
                               </TableCell>
@@ -1443,7 +1436,7 @@ export function Profile() {
               const showViewBids =
                 !!account &&
                 !!ao &&
-                ao.status === 1 &&
+                ao.status === 0 &&
                 ao.seller.toLowerCase() === account.toLowerCase();
               return [
                 showViewBids ? (
@@ -1693,8 +1686,8 @@ export function Profile() {
         <DialogContent sx={{ py: 1 }}>
           <Stack spacing={1.5} sx={{ mt: 1 }}>
             <Alert severity="info">
-              降价：在下方填写<strong>低于当前价</strong>的新价格，签名并发送链上交易，NFT
-              仍托管在市场合约。提价：请先「取消上架」再「挂单」以更高价重新上架。
+              降价：在下方填写<strong>低于当前价</strong>的新价格，直接重新签名上架新的订单（无需先取消上架）。
+              提价：请先「取消上架」下架当前订单，然后再「挂单」以更高价重新上架。
             </Alert>
             {changePriceError && (
               <Alert severity="error">{changePriceError}</Alert>
@@ -1777,8 +1770,7 @@ export function Profile() {
                         ? activeListingByNftListId[bidDialogNft.id]
                         : undefined;
                       const canAccept =
-                        bid.status === 1 &&
-                        listingOrder?.status === 1;
+                        bid.status === 0 && listingOrder?.status === 0;
                       return (
                         <TableRow key={bid.id}>
                           <TableCell sx={{ maxWidth: 140, wordBreak: "break-all" }}>
@@ -1994,26 +1986,7 @@ export function Profile() {
                             : "-"}
                         </TableCell>
                         <TableCell align="right">
-                          {account &&
-                          row.buyer.toLowerCase() === account.toLowerCase() &&
-                          (row.status === 3 ||
-                            row.status === 5 ||
-                            row.status === 6) &&
-                          row.listingHash?.trim() ? (
-                            <Button
-                              size="small"
-                              variant="contained"
-                              color="secondary"
-                              disabled={reclaimHistoryBidId === row.id}
-                              onClick={() =>
-                                void handleReclaimBidFromHistory(row)
-                              }
-                            >
-                              {reclaimHistoryBidId === row.id
-                                ? "处理中…"
-                                : "取回托管"}
-                            </Button>
-                          ) : null}
+                        {null}
                         </TableCell>
                       </TableRow>
                     ))
