@@ -47,6 +47,13 @@ export function getBloomNFTContract(
   return new Contract(address, BloomNFTArtifact.abi, providerOrSigner);
 }
 
+export function getBloomNFTContractAt(
+  providerOrSigner: BrowserProvider | JsonRpcSigner,
+  nftAddress: string
+) {
+  return new Contract(nftAddress, BloomNFTArtifact.abi, providerOrSigner);
+}
+
 export function getBloomNFTAddress(chainId: number | null): string {
   return getAddress("BloomNFT", chainId);
 }

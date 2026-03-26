@@ -38,7 +38,7 @@ import { useConfirmDialog } from "../components/ConfirmDialog";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { API_ENDPOINTS } from "../config/api";
 import {
-  getBloomNFTContract,
+  getBloomNFTContractAt,
   getBloomNFTAddress,
   getBloomMarketplaceContract,
   getBloomMarketplaceAddress,
@@ -58,6 +58,8 @@ interface NftItem {
   metadataUrl: string;
   tokenUrl: string;
   tokenId: number;
+  /** NFT 合约地址（来自后端 nft.address；用于 merkle leaf / EIP-712 签名） */
+  nftAddress?: string;
   status?: number;
   statusDesc?: string;
 }
@@ -65,6 +67,7 @@ interface NftItem {
 interface EntryOrderItem {
   id: number;
   nftListId: number;
+  nftAddress?: string;
   seller: string;
   buyer?: string;
   tokenId: number;
@@ -435,7 +438,7 @@ export function Profile() {
       setOrderError("请至少选择一件未挂单的 NFT。");
       return;
     }
-    const nftAddress = getBloomNFTAddress(chainId);
+    const nftAddressFallback = getBloomNFTAddress(chainId);
     const marketplaceAddress = getBloomMarketplaceAddress(chainId);
 
     setBatchListSubmitting(true);
@@ -443,24 +446,39 @@ export function Profile() {
     setOrderSuccess(null);
     try {
       const marketplaceAddressForApprove = getBloomMarketplaceAddress(chainId);
-      const nftContract = getBloomNFTContract(signer, chainId);
-      const approvedForAll: boolean = await nftContract.isApprovedForAll(
-        account,
-        marketplaceAddressForApprove
+      // 批量上架可能包含不同 NFT 合约（BloomNFT/BloomNFT1），需要分别授权。
+      const nftAddressesToApprove = Array.from(
+        new Set(
+          picked.map((n) => (n.nftAddress || nftAddressFallback).toLowerCase())
+        )
       );
-      if (!approvedForAll) {
-        setOrderSuccess("正在进行 NFT 授权…");
-        const approveTx = await nftContract.setApprovalForAll(
-          marketplaceAddressForApprove,
-          true
+      for (const nftAddr of nftAddressesToApprove) {
+        const nftContract = getBloomNFTContractAt(signer, nftAddr);
+        const approvedForAll: boolean = await nftContract.isApprovedForAll(
+          account,
+          marketplaceAddressForApprove
         );
-        await approveTx.wait();
+        if (!approvedForAll) {
+          setOrderSuccess(`正在授权 NFT 合约 ${nftAddr}…`);
+          const approveTx = await nftContract.setApprovalForAll(
+            marketplaceAddressForApprove,
+            true
+          );
+          await approveTx.wait();
+        }
       }
 
-      const salts: bigint[] = [];
-      const leaves: string[] = [];
-      const pricesNum: number[] = [];
-      const deadlinesIso: string[] = [];
+      type LeafMeta = {
+        nftListId: number;
+        tokenId: number;
+        priceNum: number;
+        deadlineIso: string;
+        salt: bigint;
+        nftAddress: string;
+        leaf: string;
+      };
+
+      const leafMetas: LeafMeta[] = [];
       let rootDeadlineSec = 0n;
 
       for (const nft of picked) {
@@ -488,19 +506,26 @@ export function Profile() {
         const priceWei = parseUnits(String(priceNum), 18);
         const salt = randomSalt();
 
-        salts.push(salt);
-        leaves.push(
-          listingLeafHash(
-            nftAddress,
-            account,
-            BigInt(nft.tokenId),
-            priceWei,
-            deadlineSec,
-            salt
-          )
+        // 每个 NFT 可能来自不同合约（BloomNFT / BloomNFT1），merkle leaf 必须使用对应合约地址。
+        const nftAddress = nft.nftAddress || nftAddressFallback;
+        const leaf = listingLeafHash(
+          nftAddress,
+          account,
+          BigInt(nft.tokenId),
+          priceWei,
+          deadlineSec,
+          salt
         );
-        pricesNum.push(priceNum);
-        deadlinesIso.push(deadlineIso);
+
+        leafMetas.push({
+          nftListId: nft.id,
+          tokenId: nft.tokenId,
+          priceNum,
+          deadlineIso,
+          salt,
+          nftAddress,
+          leaf,
+        });
         if (deadlineSec > rootDeadlineSec) rootDeadlineSec = deadlineSec;
       }
 
@@ -508,6 +533,7 @@ export function Profile() {
         throw new Error("批量上架的 rootDeadlineSec 计算失败");
       }
 
+      const leaves = leafMetas.map((m) => m.leaf);
       const { root, layers } = buildMerkleTreeFromLeaves(leaves);
       const rootDeadlineMs = Number(rootDeadlineSec) * 1000;
       const rootDeadlineIso = new Date(rootDeadlineMs).toISOString();
@@ -533,15 +559,15 @@ export function Profile() {
         }
       );
 
-      const items = picked.map((nft, idx) => {
+      const items = leafMetas.map((m, idx) => {
         const proof = getMerkleProof(layers, idx);
         return {
-          nftListId: nft.id,
+          nftListId: m.nftListId,
           seller: account,
-          tokenId: nft.tokenId,
-          price: pricesNum[idx],
-          deadline: deadlinesIso[idx],
-          salt: salts[idx].toString(),
+          tokenId: m.tokenId,
+          price: m.priceNum,
+          deadline: m.deadlineIso,
+          salt: m.salt.toString(),
           proof,
         };
       });
@@ -653,13 +679,14 @@ export function Profile() {
     const deadlineIso = new Date(deadlineLocal).toISOString();
 
     // EIP-712 签名：Listing(..., uint256 salt)
-    const nftAddress = getBloomNFTAddress(chainId);
+    const nftAddress =
+      selectedNft.nftAddress || getBloomNFTAddress(chainId);
     const marketplaceAddress = getBloomMarketplaceAddress(chainId);
     const deadlineSeconds = Math.floor(new Date(deadlineIso).getTime() / 1000);
 
     // 挂单前确保 marketplace 已被 NFT 合约授权（一次授权可复用）。
     try {
-      const nftContract = getBloomNFTContract(signer, chainId);
+      const nftContract = getBloomNFTContractAt(signer, nftAddress);
       const approvedForAll: boolean = await nftContract.isApprovedForAll(
         account,
         marketplaceAddress
@@ -858,7 +885,8 @@ export function Profile() {
       }
 
       // 复用「挂单」签名逻辑：Listing EIP-712（链上只做结算，订单签名由签名者离线完成）
-      const nftAddress = getBloomNFTAddress(chainId);
+      const nftAddress =
+        changePriceNft.nftAddress || getBloomNFTAddress(chainId);
       const marketplaceAddress = getBloomMarketplaceAddress(chainId);
       const saltBig = BigInt(hexlify(randomBytes(32)));
 
@@ -890,7 +918,7 @@ export function Profile() {
       };
 
       // 挂单前确保 marketplace 已被 NFT 合约授权
-      const nftContract = getBloomNFTContract(signer, chainId);
+      const nftContract = getBloomNFTContractAt(signer, nftAddress);
       const approvedForAll: boolean = await nftContract.isApprovedForAll(
         account,
         marketplaceAddress

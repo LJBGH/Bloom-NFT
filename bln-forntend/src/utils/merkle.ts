@@ -46,7 +46,8 @@ export function buildMerkleTreeFromLeaves(leaves: string[]): MerkleTreeResult {
       if (i + 1 < level.length) {
         next.push(commutativeKeccak256(level[i], level[i + 1]));
       } else {
-        next.push(level[i]);
+        // 与 OpenZeppelin MerkleTree 兼容：当节点数量为奇数，最后一个节点与自己配对 hash
+        next.push(commutativeKeccak256(level[i], level[i]));
       }
     }
     level = next as `0x${string}`[];
@@ -62,12 +63,27 @@ export function getMerkleProof(layers: string[][], leafIndex: number): string[] 
   for (let layer = 0; layer < layers.length - 1; layer++) {
     const row = layers[layer];
     const siblingIdx = idx % 2 === 1 ? idx - 1 : idx + 1;
-    if (siblingIdx < row.length) {
-      proof.push(row[siblingIdx]);
-    }
+    // 与 buildMerkleTreeFromLeaves 相同规则：奇数层末尾缺失 sibling 时，用自身作为 sibling
+    if (siblingIdx < row.length) proof.push(row[siblingIdx]);
+    else proof.push(row[idx]);
     idx = Math.floor(idx / 2);
   }
   return proof;
+}
+
+/** 与 OpenZeppelin MerkleProof.verify 等价的前端校验（使用 commutativeKeccak256） */
+export function verifyMerkleProof(
+  proof: string[],
+  root: string,
+  leaf: string
+): boolean {
+  let computed = leaf.startsWith("0x") ? leaf : `0x${leaf}`;
+  const r = root.toLowerCase();
+  for (const p of proof) {
+    const pp = p.startsWith("0x") ? p : `0x${p}`;
+    computed = commutativeKeccak256(computed, pp);
+  }
+  return computed.toLowerCase() === r;
 }
 
 export function randomSalt(): bigint {

@@ -384,6 +384,18 @@ func (n *NftOrdersService) OrdersBidAccepted(request *request.BidAcceptedRequest
 	if err != nil {
 		return "", fmt.Errorf("acceptBid on-chain failed: %w", err)
 	}
+	// 关键：acceptBid 成功后 token 已在链上从 entry.Seller 转移出去。
+	// 此时如果前端又立刻第二次点击“接受出价”，DB 中 entry.Status 还可能因监听器延迟未更新，
+	// 导致走到 seller not owner(precheck)。这里主动把状态更新为已成交，避免后续重复 accept 失败且给出更友好的错误。
+	entry.Status = enums.ListingCompleted
+	entry.TxHash = txHash.Hex()
+	entry.Buyer = bid.Buyer
+	entry.UpdateTime = time.Now().UTC()
+	if err := n.NftOrdersRepository.DB.Save(&entry).Error; err != nil {
+		// 状态更新失败不应阻断链上已成功的成交；只返回 txHash。
+		// 监听器后续也会做一致性修正。
+		fmt.Printf("warning: update entry status after acceptBid failed: %v\n", err)
+	}
 	return txHash.Hex(), nil
 }
 
@@ -399,10 +411,18 @@ func entryOrdersWithImageToResponse(entryOrders []repository.EntryOrdersWithImag
 		resp = append(resp, response.EntryOrdersResponse{
 			ID:         m.ID,
 			NftListID:  m.NftListID,
+			NftAddress: strings.TrimSpace(m.NftAddress),
 			Seller:     m.Seller,
 			Buyer:      m.Buyer,
 			TokenId:    m.TokenId,
 			Price:      m.Price,
+			PriceWei: func() string {
+				wei, err := utils.BtToWei(m.Price)
+				if err != nil {
+					return ""
+				}
+				return wei.String()
+			}(),
 			Deadline:   m.Deadline,
 			Salt:       m.Salt,
 			Status:     m.Status,

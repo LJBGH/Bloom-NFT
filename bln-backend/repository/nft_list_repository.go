@@ -22,13 +22,24 @@ type NftListWithEntryOrders struct {
 	EntryOrders model.EntryOrders `gorm:"foreignKey:NftListID"`
 }
 
+// NftListWithEntryOrdersAndAddress 在 NftListWithEntryOrders 基础上追加 NFT 合约地址（来自 nft.address）
+type NftListWithEntryOrdersAndAddress struct {
+	model.NftList
+	EntryOrders model.EntryOrders `gorm:"foreignKey:NftListID"`
+	NftAddress  string           `gorm:"column:nft_address"`
+}
+
 // 根据nftID获取NFTList
-func (n *NftListRepository) GetListByNftId(nftId uint) ([]NftListWithEntryOrders, error) {
+func (n *NftListRepository) GetListByNftId(nftId uint) ([]NftListWithEntryOrdersAndAddress, error) {
 	// 使用结构体作为条件，让 GORM 根据字段映射到正确的列名（避免 nftId/nft_id 不一致）。
 	// 关联查询 entry_orders表，获取订单状态
 
-	var nftListWithEntryOrders []NftListWithEntryOrders
-	query := n.DB.Where(&model.NftList{NftID: nftId}).Joins("LEFT JOIN orders_entry ON orders_entry.nft_list_id = nft_list.id")
+	var nftListWithEntryOrders []NftListWithEntryOrdersAndAddress
+	query := n.DB.
+		Where(&model.NftList{NftID: nftId}).
+		Joins("LEFT JOIN orders_entry ON orders_entry.nft_list_id = nft_list.id").
+		Joins("LEFT JOIN nft ON nft.id = nft_list.nft_id").
+		Select("nft_list.*, orders_entry.*, nft.address AS nft_address")
 	if err := query.Find(&nftListWithEntryOrders).Error; err != nil {
 		return nil, err
 	}
@@ -58,6 +69,20 @@ func (n *NftListRepository) GetListByOwnerAndNftId(owner string, nftId uint) ([]
 		return nil, err
 	}
 	return nftList, nil
+}
+
+// GetListByOwnerAndNftIdWithEntryOrdersAndAddress 返回 owner 在某个 nftId 类目下的 NFT 列表，同时带上 entry_orders 状态与 nft.address
+func (n *NftListRepository) GetListByOwnerAndNftIdWithEntryOrdersAndAddress(owner string, nftId uint) ([]NftListWithEntryOrdersAndAddress, error) {
+	var res []NftListWithEntryOrdersAndAddress
+	query := n.DB.
+		Where("nft_list.owner = ? AND nft_list.nft_id = ?", owner, nftId).
+		Joins("LEFT JOIN orders_entry ON orders_entry.nft_list_id = nft_list.id").
+		Joins("LEFT JOIN nft ON nft.id = nft_list.nft_id").
+		Select("nft_list.*, orders_entry.*, nft.address AS nft_address")
+	if err := query.Find(&res).Error; err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // 插入

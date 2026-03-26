@@ -19,7 +19,7 @@ contract BloomNFT is Ownable, ERC721URIStorage {
     event Mint(address indexed sender, uint256 indexed tokenId, string url);
     event Withdraw(address indexed sender, uint256 amount);
 
-    constructor() Ownable(msg.sender) ERC721("BloomNFT", "BNFT") {
+    constructor(string memory name, string memory symbol) Ownable(msg.sender) ERC721(name, symbol) {
         price = 10000; // 10000wei
         maxBalance = 3;
         maxSupply = 8000;

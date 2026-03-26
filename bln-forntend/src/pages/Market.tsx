@@ -38,14 +38,19 @@ import {
   getBloomNFTAddress,
   getBloomTokenContract,
 } from "../web3/contracts";
+import { listingLeafHash, verifyMerkleProof } from "../utils/merkle";
 
 interface EntryOrder {
   id: number;
   nftListId: number;
+  /** NFT 合约地址（来自后端 nft.address；用于支持多套 NFT 合约） */
+  nftAddress?: string;
   seller: string;
   buyer: string;
   tokenId: number;
   price: number;
+  /** price 转 wei（uint256，十进制字符串）由后端提供，用于 Merkle 校验避免浮点精度误差 */
+  priceWei?: string;
   deadline: string; // backend time.Time (string)
   /** Listing EIP-712 salt（十进制字符串） */
   salt?: string;
@@ -178,6 +183,10 @@ export function Market() {
       setError("当前订单状态不可购买。");
       return;
     }
+    if (order.seller.toLowerCase() === account.toLowerCase()) {
+      setError("不能购买自己的挂单（seller=buyer）。");
+      return;
+    }
     try {
       setBuySubmittingId(order.id);
       setError(null);
@@ -195,7 +204,9 @@ export function Market() {
       }
       // 当前合约 ABI 中没有 listingOriginalPrice/effectiveListingPrice，
       // 用订单当前 price 作为 listing.price 来构造 Listing，确保签名验签使用同一组字段。
-      const origWei: bigint = parseUnits(String(order.price), 18);
+      const origWei: bigint = order.priceWei
+        ? BigInt(order.priceWei)
+        : parseUnits(String(order.price), 18);
       const payWei: bigint = origWei;
       const allowance: bigint = await tokenContract.allowance(account, marketplaceAddress);
       if (allowance < payWei) {
@@ -204,7 +215,7 @@ export function Market() {
       }
 
       const listing = {
-        nft: getBloomNFTAddress(chainId),
+        nft: order.nftAddress || getBloomNFTAddress(chainId),
         seller: order.seller,
         tokenId: BigInt(order.tokenId),
         price: origWei,
@@ -267,6 +278,13 @@ export function Market() {
       setError("请至少勾选 2 个「进行中」订单用于批量购买。");
       return;
     }
+    const mySelected = selected.filter(
+      (o) => o.seller.toLowerCase() === account.toLowerCase()
+    );
+    if (mySelected.length > 0) {
+      setError("批量购买不能包含自己的挂单（seller=buyer）。");
+      return;
+    }
     setBuyBatchSubmitting(true);
     setError(null);
     setSuccess(null);
@@ -274,7 +292,6 @@ export function Market() {
       const marketplaceAddress = getBloomMarketplaceAddress(chainId);
       const tokenContract = getBloomTokenContract(signer, chainId);
       const marketplace = getBloomMarketplaceContract(signer, chainId);
-      const nftAddr = getBloomNFTAddress(chainId);
 
       const zeroBytes32 = "0x" + "0".repeat(64);
       const normalizeSig = (s: string) => (s.startsWith("0x") ? s : `0x${s}`);
@@ -295,10 +312,12 @@ export function Market() {
 
       let totalPay = 0n;
       for (const o of selected) {
-        const priceWei = parseUnits(String(o.price), 18);
+        const priceWei = o.priceWei
+          ? BigInt(o.priceWei)
+          : parseUnits(String(o.price), 18);
         totalPay += priceWei;
         listings.push({
-          nft: nftAddr,
+          nft: o.nftAddress || getBloomNFTAddress(chainId),
           seller: o.seller,
           tokenId: BigInt(o.tokenId),
           price: priceWei,
@@ -322,6 +341,33 @@ export function Market() {
           );
           rootDeadlines.push(BigInt(o.rootDeadlineSec));
           batchSignatures.push(normalizeSig(o.signature));
+
+          // 离线预检查：确认 merkleProof 能在本地还原出 merkleRoot
+          const deadlineSec = BigInt(
+            Math.floor(new Date(o.deadline).getTime() / 1000)
+          );
+          const salt = BigInt(o.salt || "0");
+          const nftAddr = o.nftAddress || getBloomNFTAddress(chainId);
+          const leaf = listingLeafHash(
+            nftAddr,
+            o.seller,
+            BigInt(o.tokenId),
+            priceWei,
+            deadlineSec,
+            salt
+          );
+          const ok = verifyMerkleProof(
+            o.merkleProof.map((p) =>
+              p.startsWith("0x") ? p : `0x${p}`
+            ),
+            o.merkleRoot.startsWith("0x") ? o.merkleRoot : `0x${o.merkleRoot}`,
+            leaf
+          );
+          if (!ok) {
+            throw new Error(
+              `Merkle 校验失败：ordersId=${o.id}, nft=${nftAddr}, tokenId=${o.tokenId}. 请确认价格/deadline/salt 是否与 seller 生成 leaf 时一致。`
+            );
+          }
         } else {
           listingSignatures.push(normalizeSig(o.signature));
           proofs.push([]);
@@ -385,9 +431,19 @@ export function Market() {
 
       // bidWithSig 会 transferFrom(买家 -> 市场)，必须先授权 BloomToken 给市场合约（与「购买」一致）
       const tokenContract = getBloomTokenContract(signer, chainId);
-      const allowance: bigint = await tokenContract.allowance(account, marketplaceAddress);
-      if (allowance < priceWei) {
-        const approveTx = await tokenContract.approve(marketplaceAddress, priceWei);
+      // 注意：acceptBid 会消耗 ERC20 allowance。
+      // 若同一 buyer 之后还有多笔 bid 被 seller 依次 accept，单次只 approve(priceWei) 可能导致后续 accept revert。
+      // 这里把 allowance 递增到 allowance + priceWei，确保连续 accept 时额度仍足够。
+      const allowance: bigint = await tokenContract.allowance(
+        account,
+        marketplaceAddress
+      );
+      const targetAllowance = allowance + priceWei;
+      if (allowance < targetAllowance) {
+        const approveTx = await tokenContract.approve(
+          marketplaceAddress,
+          targetAllowance
+        );
         await approveTx.wait();
       }
 
@@ -411,7 +467,7 @@ export function Market() {
           ],
         },
         {
-          nft: getBloomNFTAddress(chainId),
+          nft: selectedOrder.nftAddress || getBloomNFTAddress(chainId),
           buyer: account,
           tokenId: BigInt(selectedOrder.tokenId),
           price: priceWei,
@@ -474,7 +530,7 @@ export function Market() {
     try {
       const mp = getBloomMarketplaceContract(signer, chainId);
       const bidStruct = {
-        nft: getBloomNFTAddress(chainId),
+        nft: detailOrder.nftAddress || getBloomNFTAddress(chainId),
         buyer: bid.buyer,
         tokenId: BigInt(detailOrder.tokenId),
         price: parseUnits(String(bid.price), 18),

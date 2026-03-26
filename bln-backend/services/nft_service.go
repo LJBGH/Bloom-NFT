@@ -112,6 +112,7 @@ func (n *NftService) AllNftList(nftId uint) ([]response.NftListResult, error) {
 		result = append(result, response.NftListResult{
 			ID:          nft.ID,
 			NftID:       nft.NftID,
+			NftAddress:  nft.NftAddress,
 			Name:        nft.Name,
 			Description: nft.Description,
 			ImageUrl:    nft.ImageUrl,
@@ -149,10 +150,31 @@ func (n *NftService) CategoriesByOwner(owner string) ([]model.Nft, error) {
 }
 
 // 根据用户地址和 NFT 系列 Id 获取该用户在该类目下的所有 NFT
-func (n *NftService) NftListByOwnerAndNftId(owner string, nftId uint) ([]model.NftList, error) {
-	list, err := n.NftListRepository.GetListByOwnerAndNftId(owner, nftId)
+func (n *NftService) NftListByOwnerAndNftId(owner string, nftId uint) ([]response.NftListResult, error) {
+	list, err := n.NftListRepository.GetListByOwnerAndNftIdWithEntryOrdersAndAddress(owner, nftId)
 	if err != nil {
 		return nil, err
 	}
-	return list, nil
+
+	result := make([]response.NftListResult, 0, len(list))
+	for _, nft := range list {
+		result = append(result, response.NftListResult{
+			ID:          nft.ID,
+			NftID:       nft.NftID,
+			NftAddress:  nft.NftAddress,
+			Name:        nft.Name,
+			Description: nft.Description,
+			ImageUrl:    nft.ImageUrl,
+			MetadataUrl: nft.MetadataUrl,
+			TokenUrl:    nft.TokenUrl,
+			TokenId:     nft.TokenId,
+			Owner:       nft.Owner,
+			CreateTime:  nft.CreateTime,
+			UpdateTime:  nft.UpdateTime,
+			Status:      nft.EntryOrders.Status,
+			StatusDesc:  nft.EntryOrders.Status.Desc(),
+			Price:       nft.EntryOrders.Price,
+		})
+	}
+	return result, nil
 }

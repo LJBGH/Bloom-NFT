@@ -7,7 +7,7 @@ async function main() {
   console.log("Deploying BloomNFT with:", deployer.address);
 
   const BloomNFT = await ethers.getContractFactory("BloomNFT");
-  const bloomNFT = await BloomNFT.deploy();
+  const bloomNFT = await BloomNFT.deploy("BloomNFT", "BNFT");
   await bloomNFT.waitForDeployment();
 
   const address = await bloomNFT.getAddress();

@@ -9,10 +9,12 @@ import (
 type EntryOrdersResponse struct {
 	ID         uint         `json:"id" gorm:"primarykey"`
 	NftListID  uint         `json:"nftListId" gorm:"type:int;not null"`      // NFTID
+	NftAddress string       `json:"nftAddress"`                              // NFT 合约地址（来自 nft.address）
 	Seller     string       `json:"seller" gorm:"type:varchar(64);not null"` // 卖家地址
 	Buyer      string       `json:"buyer" gorm:"type:varchar(64)"`           // 买家地址
 	TokenId    uint         `json:"tokenId" gorm:"type:int;not null"`        // tokenId
 	Price      float64      `json:"price" gorm:"type:float;not null"`        // 价格
+	PriceWei   string       `json:"priceWei"`                               // price 转成 wei（uint256，十进制字符串）
 	Deadline   time.Time    `json:"deadline" gorm:"type:datetime; not null"` // 截止时间
 	Salt       string       `json:"salt" gorm:"type:varchar(80);not null"`   // Listing salt（十进制）
 	Status     enums.ListingStatus `json:"status" gorm:"type:int;not null"` // 挂单状态

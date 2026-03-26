@@ -101,8 +101,15 @@ func AcceptBidOnChain(
 			var ownerOut []interface{}
 			if err := nftContractReader.Call(&bind.CallOpts{Context: ctx}, &ownerOut, "ownerOf", tokenID); err == nil && len(ownerOut) > 0 {
 				if ownerAddr, ok := ownerOut[0].(common.Address); ok {
-					if ownerAddr != common.HexToAddress(entry.Seller) {
-						return common.Hash{}, errors.New("seller not owner (precheck)")
+					expectedSeller := common.HexToAddress(entry.Seller)
+					if ownerAddr != expectedSeller {
+						return common.Hash{}, fmt.Errorf(
+							"seller not owner (precheck): nft=%s tokenId=%s expectedSeller=%s actualOwner=%s",
+							nftContract.Hex(),
+							tokenID.String(),
+							expectedSeller.Hex(),
+							ownerAddr.Hex(),
+						)
 					}
 				}
 			}

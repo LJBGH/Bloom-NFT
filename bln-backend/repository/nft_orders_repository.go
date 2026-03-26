@@ -18,6 +18,7 @@ type NftOrdersRepository struct {
 type EntryOrdersWithImageUrl struct {
 	model.EntryOrders
 	ImageUrl    string `gorm:"column:image_url"`
+	NftAddress  string `gorm:"column:nft_address"`
 }
 
 func NewNftOrdersRepository(db *gorm.DB) *NftOrdersRepository {
@@ -39,8 +40,9 @@ func (n *NftOrdersRepository) GetEntryOrdersList(nftId *uint, status *enums.List
 	var entryOrders []EntryOrdersWithImageUrl
 	q := n.DB.
 		Table("orders_entry").
-		Select("orders_entry.*, nft_list.image_url AS image_url").
-		Joins("LEFT JOIN nft_list ON nft_list.id = orders_entry.nft_list_id")
+		Select("orders_entry.*, nft_list.image_url AS image_url, nft.address AS nft_address").
+		Joins("LEFT JOIN nft_list ON nft_list.id = orders_entry.nft_list_id").
+		Joins("LEFT JOIN nft ON nft.id = nft_list.nft_id")
 
 	if nftId != nil {
 		// nftId 对应的是 orders_entry.nft_list_id
@@ -64,8 +66,9 @@ func (n *NftOrdersRepository) GetEntryOrdersBySeller(seller string) ([]EntryOrde
 	var entryOrders []EntryOrdersWithImageUrl
 	err := n.DB.
 		Table("orders_entry").
-		Select("orders_entry.*, nft_list.image_url AS image_url").
+		Select("orders_entry.*, nft_list.image_url AS image_url, nft.address AS nft_address").
 		Joins("LEFT JOIN nft_list ON nft_list.id = orders_entry.nft_list_id").
+		Joins("LEFT JOIN nft ON nft.id = nft_list.nft_id").
 		Where("LOWER(orders_entry.seller) = LOWER(?)", seller).
 		Order("orders_entry.create_time DESC").
 		Find(&entryOrders).Error

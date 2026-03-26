@@ -16,6 +16,7 @@ type MintResult struct {
 type NftListResult struct {
 	ID          uint         `json:"id"`
 	NftID       uint         `json:"nftId"`
+	NftAddress  string       `json:"nftAddress"`
 	Name        string       `json:"name"`
 	Description string       `json:"description"`
 	ImageUrl    string       `json:"imageUrl"`
